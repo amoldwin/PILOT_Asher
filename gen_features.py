@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from feature_generators.gen_pdb import gen_all_pdb
 from feature_generators.gen_fasta import gen_all_fasta
-from feature_generators.SASA import use_naccess, calc_SASA
+from feature_generators.SASA import use_naccess, use_freesasa, calc_SASA
 from feature_generators.evol_info import use_psiblast, use_hhblits, gen_msa, get_pssm, process_hhm, calc_res_freq
 from feature_generators.use_esm2 import use_esm2
 from feature_generators.calc_ss import calc_ss
@@ -13,8 +13,6 @@ from feature_generators.res_atom_selection import get_nearest_resindex, get_res_
 from feature_generators.feature_alignment import feature_alignment
 from feature_generators.get_edge import get_edge
 
-
-
 foldx_path = './software/foldx'
 naccess_path = './software/naccess2.1.1/naccess'
 dssp_path = '../anaconda3/envs/pilot/bin/mkdssp'
@@ -23,6 +21,8 @@ clustalo_path = './software/clustalo'
 hhblits_path = './software/hh-suite/build/bin/hhblits'
 uniref90_path = './software/database/uniref90/uniref90'
 uniRef30_path = './software/database/uniref30/UniRef30_2022_02'
+# Set to your FreeSASA binary, or leave as 'freesasa' if it's on PATH
+freesasa_path = 'freesasa'
 
 
 def get_new_pdb_array(pdb_array, res_pdbpos, atom_indexpos):
@@ -61,10 +61,7 @@ def get_esm2(esm_name, index_pos_dict, pdb2uniprot_posdict, esm_dir):
     return extra_feature
 
 
-
-
-def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir, seq_dict):
-
+def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir, seq_dict, sasa_backend='naccess'):
     # Create folder
     row_pdb_dir = f'{dir}/row_pdb'
     cleaned_pdb_dir = f'{dir}/cleaned_pdb'
@@ -107,9 +104,14 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir, seq_dict):
         gen_all_fasta(pdb_id, chain_id, mut_pos, wild_type, mutant, cleaned_pdb_dir, fasta_dir)
 
     # Generate all basic feature files
-    print(f'Using naccess ...')
-    wild_frsa, wild_fasa = use_naccess(wild_pdb, sasa_dir, naccess_path)
-    mut_frsa, mut_fasa = use_naccess(mut_pdb, sasa_dir, naccess_path)
+    if sasa_backend.lower() == 'freesasa':
+        print(f'Using FreeSASA ...')
+        wild_frsa, wild_fasa = use_freesasa(wild_pdb, sasa_dir, freesasa_path)
+        mut_frsa, mut_fasa = use_freesasa(mut_pdb, sasa_dir, freesasa_path)
+    else:
+        print(f'Using Naccess ...')
+        wild_frsa, wild_fasa = use_naccess(wild_pdb, sasa_dir, naccess_path)
+        mut_frsa, mut_fasa = use_naccess(mut_pdb, sasa_dir, naccess_path)
 
     print(f'Using psiblast ...')
     wild_frawmsa, wild_fpssm = use_psiblast(wild_fasta, pssm_dir, psi_path, uniref90_path)
@@ -126,7 +128,6 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir, seq_dict):
     print(f'Using esm2 ...')
     use_esm2(wild_fasta, pdb_chain, esm_dir)
     use_esm2(mut_fasta, mut_id, esm_dir)
-
 
     # Calculation of all features
     print('Calculating all features ...')
@@ -152,51 +153,49 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir, seq_dict):
     mut_cs = calculate_conservation_score().calculate_js_div_from_msa(mut_fmsa, blosum_background_distr)
 
     wild_data = {
-        'sasa_res':wild_rsasa,
-        'sasa_atom':wild_asasa,
-        'ss_dict':wild_ss,
-        'depth_dict':wild_depth,
-        'pssm_dict':wild_pssm,
-        'res_dict':wild_res_dict,
-        'hhm_score':wild_hhm,
-        'conservation_dict':wild_res_freq,
-        'conservation_score':wild_cs
+        'sasa_res': wild_rsasa,
+        'sasa_atom': wild_asasa,
+        'ss_dict': wild_ss,
+        'depth_dict': wild_depth,
+        'pssm_dict': wild_pssm,
+        'res_dict': wild_res_dict,
+        'hhm_score': wild_hhm,
+        'conservation_dict': wild_res_freq,
+        'conservation_score': wild_cs
     }
 
     mut_data = {
-        'sasa_res':mut_rsasa,
-        'sasa_atom':mut_asasa,
-        'ss_dict':mut_ss,
-        'depth_dict':mut_depth,
-        'pssm_dict':mut_pssm,
-        'res_dict':mut_res_dict,
-        'hhm_score':mut_hhm,
-        'conservation_dict':mut_res_freq,
-        'conservation_score':mut_cs
+        'sasa_res': mut_rsasa,
+        'sasa_atom': mut_asasa,
+        'ss_dict': mut_ss,
+        'depth_dict': mut_depth,
+        'pssm_dict': mut_pssm,
+        'res_dict': mut_res_dict,
+        'hhm_score': mut_hhm,
+        'conservation_dict': mut_res_freq,
+        'conservation_score': mut_cs
     }
 
     # Select the atom and amino acid nearest to the mutation site
-    wild_selected_res, wild_selected_atom, wild_pdb_array = get_nearest_resindex(wild_pdb, chain_id, mut_pos,
-                                                                           aa_num=16)
-    mut_selected_res, mut_selected_atom, mut_pdb_array = get_nearest_resindex(mut_pdb, chain_id, mut_pos,
-                                                                           aa_num=16)
+    wild_selected_res, wild_selected_atom, wild_pdb_array = get_nearest_resindex(wild_pdb, chain_id, mut_pos, aa_num=16)
+    mut_selected_res, mut_selected_atom, mut_pdb_array = get_nearest_resindex(mut_pdb, chain_id, mut_pos, aa_num=16)
     wild_res_dict, wild_atom_dict = get_res_atom_dict(wild_pdb_array)
     mut_res_dict, mut_atom_dict = get_res_atom_dict(mut_pdb_array)
 
     # Obtain the features corresponding to selected atoms and amino acids
-    wild_res_feat_dict, wild_atom_feat_dict = feature_alignment(wild_selected_res, wild_selected_atom,
-                                                             wild_data, wild_res_dict, wild_atom_dict,
-                                                             pdbpos2uniprotpos_dict, mut_pos)
-    mut_res_feat_dict, mut_atom_feat_dict = feature_alignment(mut_selected_res, mut_selected_atom,
-                                                             mut_data, mut_res_dict, mut_atom_dict,
-                                                             pdbpos2uniprotpos_dict, mut_pos)
+    wild_res_feat_dict, wild_atom_feat_dict = feature_alignment(
+        wild_selected_res, wild_selected_atom, wild_data, wild_res_dict, wild_atom_dict, pdbpos2uniprotpos_dict, mut_pos
+    )
+    mut_res_feat_dict, mut_atom_feat_dict = feature_alignment(
+        mut_selected_res, mut_selected_atom, mut_data, mut_res_dict, mut_atom_dict, pdbpos2uniprotpos_dict, mut_pos
+    )
 
-    wild_pdb_array, wild_res_index_pos_dict, wild_atom_index_pos = get_new_pdb_array(wild_pdb_array,
-                                                                               wild_res_feat_dict.keys(),
-                                                                               wild_atom_feat_dict.keys())
-    mut_pdb_array, mut_res_index_pos_dict, mut_atom_index_pos = get_new_pdb_array(mut_pdb_array,
-                                                                               mut_res_feat_dict.keys(),
-                                                                               mut_atom_feat_dict.keys())
+    wild_pdb_array, wild_res_index_pos_dict, wild_atom_index_pos = get_new_pdb_array(
+        wild_pdb_array, wild_res_feat_dict.keys(), wild_atom_feat_dict.keys()
+    )
+    mut_pdb_array, mut_res_index_pos_dict, mut_atom_index_pos = get_new_pdb_array(
+        mut_pdb_array, mut_res_feat_dict.keys(), mut_atom_feat_dict.keys()
+    )
 
     # Calculate the features of the edge
     wild_res_edge_index, wild_res_edge_feature, wild_atom_res_index = get_edge().generate_res_edge_feature_postmut(
@@ -253,19 +252,3 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir, seq_dict):
     np.save(atom_edge_index_mt_path, mut_atom_edge_index)
     np.save(atom2res_index_mt_path, mut_atom_res_index)
     np.save(extra_feat_mt_path, mut_mb_data)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
