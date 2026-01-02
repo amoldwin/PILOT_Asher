@@ -15,26 +15,30 @@
 
 # Usage: sbatch slurm_precompute_array.sh ./mutation_list.txt /features naccess
 #        sbatch slurm_precompute_array.sh ./mutation_list.txt /features freesasa
-MUT_LIST=$1        # e.g., ./mutation_list.txt
-FEATURE_DIR=$2     # e.g., /projects/ashehu/amoldwin/features
-SASA_BACKEND=${3:-naccess}   # naccess or freesasa
+MUT_LIST=$1
+FEATURE_DIR=$2
+SASA_BACKEND=${3:-naccess}
 
 source ../miniconda/bin/activate
 conda activate pilot
-
-# HHblits database location for your cluster
 export HHBLITS_DB=/scratch/amoldwin/datasets/Uniref30
 UNIREF30_DIR=/scratch/amoldwin/datasets/Uniref30/UniRef30_2021_03
 
-# Optional: BLAST DB (if needed by your setup)
-# export BLASTDB=/scratch/amoldwin/datasets/Uniref90
+# Select line after filtering out blank/comment lines (0-based index)
+FILTERED=$(mktemp)
+grep -vE '^\s*(#|$)' "${MUT_LIST}" > "${FILTERED}"
 
-# Pick the line by 0-based array index
-LINE=$(awk -v idx="${SLURM_ARRAY_TASK_ID}" 'NR==idx+1{print;exit}' "${MUT_LIST}")
-echo "Precompute: ${LINE}"
+LINE=$(awk -v idx="${SLURM_ARRAY_TASK_ID}" 'NR==idx+1{print;exit}' "${FILTERED}")
 
-# Run CPU-heavy precompute (SASA + PSI-BLAST + MSA + HHblits)
-# Ensure gen_features.py has uniRef30_path set to ${UNIREF30_DIR}
+echo "Selected index=${SLURM_ARRAY_TASK_ID}"
+echo "LINE(raw)=${LINE}"
+printf 'LINE(hex)='; printf '%s' "$LINE" | hexdump -C
+
+if [[ -z "${LINE}" ]]; then
+  echo "No usable line for index ${SLURM_ARRAY_TASK_ID}; exiting."
+  exit 0
+fi
+
 python gen_features.py \
   -i <(echo "${LINE}") \
   -d "${FEATURE_DIR}" \

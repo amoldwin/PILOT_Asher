@@ -3,9 +3,12 @@ from Bio import SeqIO
 import os
 
 
+# export TORCH_HOME=/scratch/amoldwin/torch_cache
+# export TRANSFORMERS_CACHE=/scratch/amoldwin/HF_cache
+
 
 def use_esm2(fasta_file, prot_id, saved_folder):
-    os.environ['TORCH_HOME'] = '/storage2/student/djs0'
+    os.environ['TORCH_HOME'] = '/scratch/amoldwin/torch_cache'
     pt_file = saved_folder + '/' + prot_id + '.pt'
     if os.path.exists(pt_file):
         return pt_file

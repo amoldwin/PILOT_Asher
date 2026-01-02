@@ -347,16 +347,22 @@ def main():
     seq_dict = gen_seq_dict(args.uniref90_fasta)
 
     with open(args.mutant_list, 'r') as f_r:
-        for line in f_r:
-            mut_info = line.strip().split()
-            pdb_id = mut_info[0]
-            chain_id = mut_info[1]
-            mut_pos = mut_info[2]
-            wild_type = mut_info[3][0]
-            mutant = mut_info[3][-1]
+        for lnum, line in enumerate(f_r, 1):
+            raw = line.rstrip('\n')
+            if not raw or raw.lstrip().startswith('#'):
+                continue
+            mut_info = raw.split()
+            if len(mut_info) != 4:
+                raise ValueError(f'Malformed mutation line at {args.mutant_list}:{lnum}: '
+                                 f'expected 4 fields "pdb_id chain_id mut_pos amino_acid", got {len(mut_info)}: {raw!r}')
+            pdb_id, chain_id, mut_pos, aa_field = mut_info
+            if '/' not in aa_field or len(aa_field) < 3:
+                raise ValueError(f'Malformed amino_acid field at {args.mutant_list}:{lnum}: '
+                                 f'expected like H/S, got {aa_field!r}')
+            wild_type = aa_field[0]
+            mutant = aa_field[-1]
             gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, args.dir, seq_dict,
                          sasa_backend=args.sasa_backend, step=args.step)
-
 
 if __name__ == "__main__":
     main()
