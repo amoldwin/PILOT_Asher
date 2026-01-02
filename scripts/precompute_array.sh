@@ -9,15 +9,22 @@
 #SBATCH --partition=contrib
 #SBATCH --qos=normal
 #SBATCH --nodes=1
-#SBATCH --mem=128G
+#SBATCH --mem=32G
 #SBATCH --time=01-12:00:00
-#SBATCH --array=0-15
+#SBATCH --array=0-30
 
 # Usage: sbatch slurm_precompute_array.sh ./mutation_list.txt /features naccess
 #        sbatch slurm_precompute_array.sh ./mutation_list.txt /features freesasa
-MUT_LIST=$1
-FEATURE_DIR=$2
-SASA_BACKEND=${3:-naccess}
+
+##tail -n +2 dataset/training_set.txt | awk -F'\t' '{print $1, $2, $3, $4}' > dataset/mutation_list_train.txt
+##tail -n +2 dataset/test_set.txt | awk -F'\t' '{print $1, $2, $3, $4}' > dataset/mutation_list_test.txt
+
+## rm /features/sasa/{pdb}{chain}{WT}{pos}{Mut}.rsa /features/sasa/{pdb}{chain}{WT}{pos}{Mut}.asa
+
+
+MUT_LIST=dataset/mutation_list_test.txt
+FEATURE_DIR=/scratch/amoldwin/datasets/PILOT
+SASA_BACKEND=freesasa
 
 source ../miniconda/bin/activate
 conda activate pilot
@@ -44,4 +51,5 @@ python gen_features.py \
   -d "${FEATURE_DIR}" \
   -s precompute \
   --sasa-backend "${SASA_BACKEND}" \
-  --freesasa-path freesasa
+  --freesasa-path freesasa \
+  --mutator-backend proxy

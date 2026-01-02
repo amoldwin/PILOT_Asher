@@ -49,8 +49,27 @@ def gen_mut_pdb(pdb_id, chain_id, mut_pos, wild_type, mutant, cleaned_pdb_dir, f
     return f'{cleaned_pdb_dir}/{mut_id}.pdb'
 
 
-def gen_all_pdb(pdb_id, chain_id, mut_pos, wild_type, mutant, row_pdb_dir, cleaned_pdb_dir, foldx_path):
+def gen_all_pdb(pdb_id, chain_id, mut_pos, wild_type, mutant,
+                row_pdb_dir, cleaned_pdb_dir, foldx_path, mutator_backend='foldx'):
+    """
+    Returns:
+      wild_pdb, mut_pdb, mutated_by_structure (bool)
+    """
     download_row_pdb(pdb_id, row_pdb_dir)
     wild_pdb = cleaned_row_pdb(pdb_id, chain_id, row_pdb_dir, cleaned_pdb_dir)
-    mut_pdb = gen_mut_pdb(pdb_id, chain_id, mut_pos, wild_type, mutant, cleaned_pdb_dir, foldx_path)
-    return wild_pdb, mut_pdb
+
+    mutated_by_structure = False
+    if mutator_backend == 'foldx':
+        try:
+            mut_pdb = gen_mut_pdb(pdb_id, chain_id, mut_pos, wild_type, mutant, cleaned_pdb_dir, foldx_path)
+            if os.path.exists(mut_pdb):
+                mutated_by_structure = True
+            else:
+                mut_pdb = wild_pdb
+        except Exception:
+            mut_pdb = wild_pdb
+    else:
+        # proxy mode: do not build a mutant structure; reuse wild PDB
+        mut_pdb = wild_pdb
+
+    return wild_pdb, mut_pdb, mutated_by_structure

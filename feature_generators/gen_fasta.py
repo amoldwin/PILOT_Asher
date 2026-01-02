@@ -50,15 +50,30 @@ def read_pdb(pdbfile, chain_id):
     return seq, position
 
 
-
-def gen_all_fasta(pdb_id, chain_id, mut_pos, wild_type, mutant, cleaned_pdb_dir, fasta_dir):
+def gen_all_fasta(pdb_id, chain_id, mut_pos, wild_type, mutant,
+                  cleaned_pdb_dir, fasta_dir, mutated_by_structure=True):
+    """
+    If mutated_by_structure is False, construct the mutant sequence by editing the wild sequence
+    at mut_pos instead of reading a mutant PDB.
+    """
     pdbpos2uniprotpos_dict = {}
 
     mut_id = pdb_id + '_' + chain_id + '_' + wild_type + mut_pos + mutant
     wild_pdb = f'{cleaned_pdb_dir}/{pdb_id}_{chain_id}.pdb'
     mut_pdb = f'{cleaned_pdb_dir}/{mut_id}.pdb'
     wild_seq, pdb_positions = read_pdb(wild_pdb, chain_id)
-    mut_seq, _ = read_pdb(mut_pdb, chain_id)
+
+    if mutated_by_structure and os.path.exists(mut_pdb):
+        mut_seq, _ = read_pdb(mut_pdb, chain_id)
+    else:
+        # proxy mode: mutate sequence directly
+        if mut_pos not in pdb_positions:
+            raise ValueError(f'mut_pos {mut_pos} not found in {pdb_id}_{chain_id} positions {pdb_positions[:5]}...')
+        idx = pdb_positions.index(mut_pos)
+        if wild_seq[idx] != wild_type:
+            # warn but still replace
+            pass
+        mut_seq = wild_seq[:idx] + mutant + wild_seq[idx + 1:]
 
     wild_fasta = f'{fasta_dir}/{pdb_id}_{chain_id}.fasta'
     mut_fasta = f'{fasta_dir}/{mut_id}.fasta'
@@ -72,7 +87,6 @@ def gen_all_fasta(pdb_id, chain_id, mut_pos, wild_type, mutant, cleaned_pdb_dir,
             f_mut.write(f'> {mut_id}\n{mut_seq}')
 
     for i, pos1 in enumerate(pdb_positions):
-        pdbpos2uniprotpos_dict[pos1] = i+1
+        pdbpos2uniprotpos_dict[pos1] = i + 1
 
     return wild_fasta, mut_fasta, wild_seq, mut_seq, pdb_positions, pdbpos2uniprotpos_dict
-
