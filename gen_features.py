@@ -20,7 +20,7 @@ dssp_path = '../anaconda3/envs/pilot/bin/mkdssp'
 psi_path = './software/ncbi-blast-2.13.0+/bin/psiblast'
 clustalo_path = './software/clustalo'
 hhblits_path = './software/hh-suite/build/bin/hhblits'
-uniref90_path = './software/database/uniref90/uniref90'
+uniref90_path = '/scratch/amoldwin/datasets/uniref90'
 uniRef30_path = './software/database/uniref30/UniRef30_2022_02'
 # Set to your FreeSASA binary, or leave as 'freesasa' if it's on PATH
 freesasa_path = 'freesasa'
@@ -306,7 +306,7 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir, seq_dict,
     np.save(extra_feat_mt_path, mut_mb_data)
 
 
-def gen_seq_dict(uniref90_fasta_path= './database/uniref90/uniref90.fasta'):
+def gen_seq_dict(uniref90_fasta_path= '/scratch/amoldwin/datasets/uniref90.fasta'):
     seq_dict = {}
     print('Reading uniref90.fasta ...')
     with open(uniref90_fasta_path, 'r') as f_r:
@@ -338,7 +338,7 @@ def main():
     parser.add_argument('--freesasa-path', dest='freesasa_path', type=str, default='freesasa',
                         help='Path to freesasa binary if not on PATH.')
     parser.add_argument('--uniref90-fasta', dest='uniref90_fasta', type=str,
-                        default='./database/uniref90/uniref90.fasta', help='Path to uniref90.fasta')
+                        default='/scratch/amoldwin/datasets/uniref90.fasta', help='Path to uniref90.fasta')
     args = parser.parse_args()
 
     global freesasa_path
