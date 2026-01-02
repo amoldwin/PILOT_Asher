@@ -9,7 +9,7 @@
 #SBATCH --partition=contrib
 #SBATCH --qos=normal
 #SBATCH --nodes=1
-#SBATCH --mem=32G
+#SBATCH --mem=128G
 #SBATCH --time=01-12:00:00
 #SBATCH --array=0-30
 
