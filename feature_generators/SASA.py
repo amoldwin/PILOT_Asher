@@ -1,8 +1,7 @@
 import os
 import subprocess
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 
-# Python API for FreeSASA
 import freesasa
 from Bio.PDB.Polypeptide import three_to_one
 
@@ -56,64 +55,88 @@ def _three_to_one_safe(res3: str) -> str:
     try:
         return three_to_one(res3u)
     except KeyError:
-        return 'X'  # unknown
+        return 'X'
 
 
-def _read_pdb_atoms(pdb_file: str):
+def _read_pdb_atom_lines(pdb_file: str):
     """
-    Return list of (line, serial, res_pos, res3) for each ATOM/HETATM line (non-water).
-    res_pos is the residue index string like '22' or '22A' derived from columns 22:27 (seq + insertion code).
+    Return a list of dicts for each ATOM/HETATM line (including HOH) in file order.
+    We keep HOH so we can align 1:1 with FreeSASA's atom indexing, then skip HOH at write-time.
     """
     atoms = []
     with open(pdb_file, 'r') as fr:
         for line in fr:
             if line.startswith('ATOM') or line.startswith('HETATM'):
                 res3 = line[17:20].strip()
-                if res3 == 'HOH':
-                    continue
                 serial = line[6:11].strip()
                 res_pos = line[22:27].strip()  # includes insertion code
-                atoms.append((line.rstrip('\n'), serial, res_pos, res3))
+                atoms.append({
+                    'line': line.rstrip('\n'),
+                    'serial': serial,
+                    'res3': res3,
+                    'res_pos': res_pos,
+                    'is_hoh': (res3.upper() == 'HOH'),
+                })
     return atoms
 
 
-def _write_naccess_like_asa(pdb_atoms, atom_areas, asa_out):
+def _get_atom_areas_compatible(structure, result) -> List[float]:
+    """
+    FreeSASA Python API compatibility:
+    - Newer: result.atomAreas() -> iterable/list
+    - Older: result.atomArea(i) per atom
+    """
+    if hasattr(result, 'atomAreas'):
+        return list(result.atomAreas())
+    if hasattr(result, 'atomArea'):
+        return [result.atomArea(i) for i in range(structure.nAtoms())]
+    raise AttributeError("FreeSASA Result has neither atomAreas() nor atomArea(i)")
+
+
+def _write_naccess_like_asa(pdb_atoms_all, area_by_serial: Dict[str, float], asa_out: str):
     """
     Write Naccess-like .asa:
-    - Copy ATOM/HETATM lines from original PDB
-    - Insert per-atom SASA (Å²) into columns 54:62 (width 8, 2 decimals)
-    We assume FreeSASA atom order equals PDB atom order after filtering HOH.
+    - ATOM/HETATM lines copied from PDB (non-water only)
+    - SASA value (Å²) inserted into columns 54:62 (8 chars, 2 decimals)
     """
     with open(asa_out, 'w') as fw:
-        idx = 0
-        for base, serial, _, _ in pdb_atoms:
-            # pad to at least 62 chars
+        for a in pdb_atoms_all:
+            if a['is_hoh']:
+                continue
+            base = a['line']
+            serial = a['serial']
+            if serial not in area_by_serial:
+                continue
+            val = area_by_serial[serial]
             if len(base) < 62:
                 base = base + ' ' * (62 - len(base))
-            val = atom_areas[idx]
-            idx += 1
-            new_line = base[:54] + f"{val:8.2f}" + base[62:] + '\n'
-            fw.write(new_line)
+            fw.write(base[:54] + f"{val:8.2f}" + base[62:] + '\n')
 
 
-def _write_naccess_like_rsa(pdb_atoms, atom_areas, rsa_out):
+def _write_naccess_like_rsa(pdb_atoms_all, area_by_serial: Dict[str, float], rsa_out: str):
     """
     Write Naccess-compatible .rsa:
-    - One 'RES' line per residue, index at columns 9:14, percent accessible at 22:28.
-    - Percent computed from total absolute SASA divided by MAX_ASA (Tien 2013).
+    - One 'RES' line per residue, residue index at cols 9:14, percent accessible at 22:28.
+    - Percent computed using Tien 2013 MAX_ASA.
+    Uses non-water atoms only.
     """
-    # Sum atom areas per residue and compute one-letter AA per residue
     res_total: Dict[str, float] = {}
     res_one: Dict[str, str] = {}
-    for (_, _, res_pos, res3), area in zip(pdb_atoms, atom_areas):
-        res_total[res_pos] = res_total.get(res_pos, 0.0) + float(area)
+    order: List[str] = []
+    seen = set()
+
+    for a in pdb_atoms_all:
+        if a['is_hoh']:
+            continue
+        serial = a['serial']
+        if serial not in area_by_serial:
+            continue
+        res_pos = a['res_pos']
+        res3 = a['res3']
+
+        res_total[res_pos] = res_total.get(res_pos, 0.0) + float(area_by_serial[serial])
         if res_pos not in res_one:
             res_one[res_pos] = _three_to_one_safe(res3)
-
-    # Preserve residue order as encountered in PDB
-    seen = set()
-    order = []
-    for _, _, res_pos, _ in pdb_atoms:
         if res_pos not in seen:
             seen.add(res_pos)
             order.append(res_pos)
@@ -122,30 +145,24 @@ def _write_naccess_like_rsa(pdb_atoms, atom_areas, rsa_out):
         for res_pos in order:
             aa1 = res_one.get(res_pos, 'X')
             abs_area = res_total.get(res_pos, 0.0)
-            max_area = MAX_ASA.get(aa1, None)
+            max_area = MAX_ASA.get(aa1)
             if max_area is None or max_area <= 0:
                 perc = 0.0
             else:
                 perc = min(100.0, 100.0 * abs_area / max_area)
 
-            # Build fixed-width line
             line = [' '] * 80
-            # 'RES' tag
             line[0:3] = list('RES')
-            # residue index at 9:14
-            idx_str = res_pos.rjust(5)
-            line[9:14] = list(idx_str)
-            # percent accessible at 22:28
-            perc_str = f"{perc:6.2f}"
-            line[22:28] = list(perc_str)
+            line[9:14] = list(res_pos.rjust(5))
+            line[22:28] = list(f"{perc:6.2f}")
             fw.write(''.join(line) + '\n')
 
 
 def use_freesasa(pdb_file, sasa_path, freesasa_path='freesasa', radii='naccess', probe_radius='1.4'):
     """
     Produce Naccess-like RSA and ASA using FreeSASA Python API.
-    - Residue RSA: percent accessible written at columns 22:28 of 'RES' lines.
-    - Atom ASA: absolute Å² written into columns 54:62 of ATOM/HETATM lines.
+    - RSA: 'RES' lines with percent accessible in columns 22:28
+    - ASA: ATOM/HETATM lines with absolute SASA (Å²) in columns 54:62
     """
     pdb_name = os.path.basename(pdb_file).split('.')[0]
     rsa_out = os.path.join(sasa_path, pdb_name + '.rsa')
@@ -156,52 +173,39 @@ def use_freesasa(pdb_file, sasa_path, freesasa_path='freesasa', radii='naccess',
 
     os.makedirs(sasa_path, exist_ok=True)
 
-    # Read PDB atoms (skip HOH) to align with FreeSASA atom ordering
-    pdb_atoms = _read_pdb_atoms(pdb_file)
+    pdb_atoms_all = _read_pdb_atom_lines(pdb_file)
 
-    # Build FreeSASA Structure with desired classifier (radii) if available
-    # Fallback to default classifier if 'naccess' is not supported in this build.
     try:
         classifier = freesasa.Classifier(radii)
         structure = freesasa.Structure(pdb_file, classifier=classifier)
     except Exception:
         structure = freesasa.Structure(pdb_file)
 
-    # Calculate SASA with the given probe radius
     params = freesasa.Parameters({'probe-radius': float(probe_radius)})
     result = freesasa.calc(structure, params)
 
-    # Get per-atom areas; assume order matches PDB atoms parsed above after HOH filtering
-    atom_areas_all = list(result.atomAreas())
+    atom_areas = _get_atom_areas_compatible(structure, result)
 
-    # FreeSASA includes all atoms; we need to align to our filtered list (no HOH)
-    # Build an index mapping for ATOM/HETATM lines excluding HOH by scanning the structure's atoms.
-    # The simplest approach assumes the same order for non-water entries; if mismatched, create a filtered list.
-    # Here we filter by residue name not 'HOH' using structure data.
-    filtered_areas = []
-    # Iterate atoms in the structure and include only non-water in order
-    for i in range(structure.nAtoms()):
-        res_name = structure.residueName(i)
-        if res_name and res_name.upper() != 'HOH':
-            filtered_areas.append(atom_areas_all[i])
+    # Map PDB serials to atom areas by aligning in file order.
+    # We include HOH in the alignment to keep indices consistent with FreeSASA's atom list.
+    if len(atom_areas) < len(pdb_atoms_all):
+        # This is unusual; fall back to best-effort truncation
+        n = len(atom_areas)
+        pdb_atoms_all = pdb_atoms_all[:n]
+    elif len(atom_areas) > len(pdb_atoms_all):
+        atom_areas = atom_areas[:len(pdb_atoms_all)]
 
-    # Sanity: lengths must match the number of ATOM/HETATM non-water lines we parsed.
-    if len(filtered_areas) != len(pdb_atoms):
-        # Fallback to naive alignment: assume first N atoms correspond
-        filtered_areas = atom_areas_all[:len(pdb_atoms)]
+    area_by_serial: Dict[str, float] = {}
+    for a, area in zip(pdb_atoms_all, atom_areas):
+        area_by_serial[a['serial']] = float(area)
 
-    # Write outputs
-    _write_naccess_like_asa(pdb_atoms, filtered_areas, asa_out)
-    _write_naccess_like_rsa(pdb_atoms, filtered_areas, rsa_out)
+    _write_naccess_like_asa(pdb_atoms_all, area_by_serial, asa_out)
+    _write_naccess_like_rsa(pdb_atoms_all, area_by_serial, rsa_out)
 
     return rsa_out, asa_out
 
 
 def calc_SASA(rsa_file, asa_file) -> Tuple[Dict[str, float], Dict[str, float]]:
-    """
-    Parse residue-level RSA (percent accessible) and atom-level SASA (value in columns 54:62).
-    For Naccess .asa this is Å²; for our synthesized FreeSASA .asa it is also Å².
-    """
     res_sasa_dict, atom_sasa_dict = {}, {}
 
     with open(rsa_file, 'r') as fr:
