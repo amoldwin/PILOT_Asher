@@ -33,6 +33,7 @@ uniRef30_path = os.environ.get('HHBLITS_DB', './software/database/uniref30/UniRe
 # Naccess is NOT conda-installable. Use 'freesasa' backend if you don't have Naccess.
 naccess_path = './software/naccess2.1.1/naccess'
 
+
 def get_new_pdb_array(pdb_array, res_pdbpos, atom_indexpos):
     new_pdb_array = []
     res_index_pos_dict, atom_index_pos = {}, {}
@@ -88,8 +89,14 @@ def _ensure_dirs(dir):
 def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
                  sasa_backend='naccess', step='all', mutator_backend='foldx'):
     """
-    step: one of ['all', 'structures', 'precompute', 'esm2', 'assemble']
-    mutator_backend: 'foldx' (build mutant structure) or 'proxy' (reuse wild-type PDB; mutate sequence only)
+    step: one of
+      - all
+      - structures
+      - precompute
+      - precompute_psiblast_msa   (new: psiblast + msa + sasa, no hhblits)
+      - precompute_hhblits        (new: hhblits only)
+      - esm2
+      - assemble
     """
     row_pdb_dir, cleaned_pdb_dir, fasta_dir, pssm_dir, msa_dir, hhm_dir, sasa_dir, esm_dir, input_dir = _ensure_dirs(dir)
 
@@ -99,7 +106,7 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
     print(f'Pipeline step "{step}" for mutation {mut_id}.')
     print('--------------------------------------')
 
-    # Structures & FASTA
+    # Structures & FASTA (required for all downstream stages)
     print('Ensuring PDB and FASTA ...')
     wild_pdb, mut_pdb, mutated_by_structure = gen_all_pdb(
         pdb_id, chain_id, mut_pos, wild_type, mutant, row_pdb_dir, cleaned_pdb_dir, foldx_path, mutator_backend
@@ -111,50 +118,63 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
     if step == 'structures':
         return
 
-    # Precompute: SASA, PSI-BLAST, MSA, HHblits
-    if step in ['all', 'precompute']:
+    # -------------------------
+    # Precompute split stages
+    # -------------------------
+    do_sasa = step in ['all', 'precompute', 'precompute_psiblast_msa']
+    do_psiblast = step in ['all', 'precompute', 'precompute_psiblast_msa']
+    do_msa = step in ['all', 'precompute', 'precompute_psiblast_msa']
+    do_hhblits = step in ['all', 'precompute', 'precompute_hhblits']
+
+    if step in ['all', 'precompute', 'precompute_psiblast_msa', 'precompute_hhblits']:
         # SASA
-        if sasa_backend.lower() == 'freesasa':
-            print('Using FreeSASA ...')
-            wild_frsa, wild_fasa = use_freesasa(wild_pdb, sasa_dir, freesasa_path)
-            if mutated_by_structure:
-                _ = use_freesasa(mut_pdb, sasa_dir, freesasa_path)
+        if do_sasa:
+            if sasa_backend.lower() == 'freesasa':
+                print('Using FreeSASA ...')
+                wild_frsa, wild_fasa = use_freesasa(wild_pdb, sasa_dir, freesasa_path)
+                if mutated_by_structure:
+                    _ = use_freesasa(mut_pdb, sasa_dir, freesasa_path)
+                else:
+                    mut_frsa = os.path.join(sasa_dir, f'{mut_id}.rsa')
+                    mut_fasa = os.path.join(sasa_dir, f'{mut_id}.asa')
+                    if not os.path.exists(mut_frsa):
+                        shutil.copyfile(wild_frsa, mut_frsa)
+                    if not os.path.exists(mut_fasa):
+                        shutil.copyfile(wild_fasa, mut_fasa)
             else:
-                mut_frsa = os.path.join(sasa_dir, f'{mut_id}.rsa')
-                mut_fasa = os.path.join(sasa_dir, f'{mut_id}.asa')
-                if not os.path.exists(mut_frsa):
-                    shutil.copyfile(wild_frsa, mut_frsa)
-                if not os.path.exists(mut_fasa):
-                    shutil.copyfile(wild_fasa, mut_fasa)
-        else:
-            print('Using Naccess ...')
-            wild_frsa, wild_fasa = use_naccess(wild_pdb, sasa_dir, naccess_path)
-            if mutated_by_structure:
-                _ = use_naccess(mut_pdb, sasa_dir, naccess_path)
-            else:
-                mut_frsa = os.path.join(sasa_dir, f'{mut_id}.rsa')
-                mut_fasa = os.path.join(sasa_dir, f'{mut_id}.asa')
-                if not os.path.exists(mut_frsa):
-                    shutil.copyfile(wild_frsa, mut_frsa)
-                if not os.path.exists(mut_fasa):
-                    shutil.copyfile(wild_fasa, mut_fasa)
+                print('Using Naccess ...')
+                wild_frsa, wild_fasa = use_naccess(wild_pdb, sasa_dir, naccess_path)
+                if mutated_by_structure:
+                    _ = use_naccess(mut_pdb, sasa_dir, naccess_path)
+                else:
+                    mut_frsa = os.path.join(sasa_dir, f'{mut_id}.rsa')
+                    mut_fasa = os.path.join(sasa_dir, f'{mut_id}.asa')
+                    if not os.path.exists(mut_frsa):
+                        shutil.copyfile(wild_frsa, mut_frsa)
+                    if not os.path.exists(mut_fasa):
+                        shutil.copyfile(wild_fasa, mut_fasa)
 
-        # PSI-BLAST + PSSM
-        print('Using psiblast ...')
-        wild_frawmsa, wild_fpssm = use_psiblast(wild_fasta, pssm_dir, psi_path, uniref90_path)
-        mut_frawmsa, mut_fpssm = use_psiblast(mut_fasta, pssm_dir, psi_path, uniref90_path)
+        # PSI-BLAST + PSSM + rawmsa
+        if do_psiblast:
+            print('Using psiblast ...')
+            wild_frawmsa, wild_fpssm = use_psiblast(wild_fasta, pssm_dir, psi_path, uniref90_path)
+            mut_frawmsa, mut_fpssm = use_psiblast(mut_fasta, pssm_dir, psi_path, uniref90_path)
 
-        # MSA (low-memory: fetch hits via blastdbcmd)
-        print('Generating MSA files ...')
-        _ = gen_msa(pdb_chain, wild_seq, wild_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
-        _ = gen_msa(mut_id, mut_seq, mut_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
+        # MSA (blastdbcmd-based)
+        if do_msa:
+            print('Generating MSA files ...')
+            wild_frawmsa = os.path.join(pssm_dir, f'{pdb_chain}.rawmsa')
+            mut_frawmsa = os.path.join(pssm_dir, f'{mut_id}.rawmsa')
+            _ = gen_msa(pdb_chain, wild_seq, wild_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
+            _ = gen_msa(mut_id, mut_seq, mut_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
 
         # HHblits
-        print('Using hhblits ...')
-        _ = use_hhblits(pdb_chain, wild_fasta, hhblits_path, uniRef30_path, hhm_dir)
-        _ = use_hhblits(mut_id, mut_fasta, hhblits_path, uniRef30_path, hhm_dir)
+        if do_hhblits:
+            print('Using hhblits ...')
+            _ = use_hhblits(pdb_chain, wild_fasta, hhblits_path, uniRef30_path, hhm_dir)
+            _ = use_hhblits(mut_id, mut_fasta, hhblits_path, uniRef30_path, hhm_dir)
 
-        if step == 'precompute':
+        if step in ['precompute', 'precompute_psiblast_msa', 'precompute_hhblits']:
             return
 
     # ESM2
@@ -165,7 +185,7 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
         if step == 'esm2':
             return
 
-    # Assemble
+    # Assemble (unchanged)
     print('Assembling features ...')
     wild_rsa = os.path.join(sasa_dir, f'{pdb_id}_{chain_id}.rsa')
     wild_asa = os.path.join(sasa_dir, f'{pdb_id}_{chain_id}.asa')
@@ -339,7 +359,8 @@ def main():
     parser.add_argument('-d', '--feature-dir', dest='dir', type=str, required=True,
                         help='Root path to store intermediate features and model inputs.')
     parser.add_argument('-s', '--step', dest='step', type=str, default='all',
-                        choices=['all', 'structures', 'precompute', 'esm2', 'assemble'],
+                        choices=['all', 'structures', 'precompute', 'precompute_psiblast_msa', 'precompute_hhblits',
+                                 'esm2', 'assemble'],
                         help='Which pipeline step to run.')
     parser.add_argument('--sasa-backend', dest='sasa_backend', type=str, default='naccess',
                         choices=['naccess', 'freesasa'], help='SASA backend to use.')
