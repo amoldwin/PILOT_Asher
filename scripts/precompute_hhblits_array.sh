@@ -12,23 +12,23 @@
 #SBATCH --mem=3G
 #SBATCH --time=02-00:00:00
 
-# Example for 5000 variants: 0-4999%400
+# IMPORTANT: set to 0-(N-1)%MAX_CONCURRENT
 #SBATCH --array=0-4999%400
 
 set -euo pipefail
 
-MUT_LIST=${1:?Usage: sbatch precompute_hhblits_array.sh MUT_LIST FEATURE_DIR}
-FEATURE_DIR=${2:?Usage: sbatch precompute_hhblits_array.sh MUT_LIST FEATURE_DIR}
+MUT_LIST="${1:?Usage: sbatch scripts/precompute_hhblits_array.sh MUT_LIST FEATURE_DIR}"
+FEATURE_DIR="${2:?Usage: sbatch scripts/precompute_hhblits_array.sh MUT_LIST FEATURE_DIR}"
 
-source ../miniconda/bin/activate
+source ~/PROJECTS/miniconda/etc/profile.d/conda.sh
 conda activate pilot
 
-# REQUIRED for hhblits:
 export HHBLITS_DB=/scratch/amoldwin/datasets/Uniref30/UniRef30_2021_03
 
 FILTERED=$(mktemp)
 trap 'rm -f "${FILTERED}"' EXIT
 grep -vE '^\s*(#|$)' "${MUT_LIST}" > "${FILTERED}"
+
 LINE=$(awk -v idx="${SLURM_ARRAY_TASK_ID}" 'NR==idx+1{print;exit}' "${FILTERED}")
 
 echo "TASK=${SLURM_ARRAY_TASK_ID}"
