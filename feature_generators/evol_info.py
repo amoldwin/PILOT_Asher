@@ -61,30 +61,130 @@ def use_psiblast(fasta_file, rawmsa_dir, psi_path, uniref90_path, num_threads: i
     return rawmsa_file, pssm_file
 
 
-def format_rawmsa(prot_id, rawmsa_file, seq_dict, formatted_output_file):
-    identifiers_to_align = set()
+def _extract_hit_ids_from_rawmsa(prot_id: str, rawmsa_file: str):
+    """
+    Parse PSI-BLAST -out (pairwise) output and extract hit IDs (from '>' lines).
+
+    We return a list of IDs that can be passed to blastdbcmd -entry_batch.
+    This function intentionally supports multiple header styles.
+    """
+    ids = []
+    with open(rawmsa_file, "r") as infile:
+        for line in infile:
+            if not line.startswith(">"):
+                continue
+            header = line.strip().split()[0]  # take first token
+            header = header.lstrip(">")
+
+            # Skip query itself if it appears
+            # Sometimes query id is embedded differently, so be conservative.
+            if prot_id in header:
+                continue
+
+            # Existing code assumed "..._<ID>" and used split('_')[1].
+            # Keep that behavior as a fallback, but prefer the full header first.
+            ids.append(header)
+
+    # Deduplicate while preserving order
+    seen = set()
+    out = []
+    for x in ids:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def _blastdbcmd_fetch_fasta(entry_ids, blastdbcmd_path: str, uniref90_path: str) -> str:
+    """
+    Fetch sequences for a list of entry IDs using blastdbcmd and return FASTA text.
+
+    Uses -entry_batch for efficiency (one process call).
+    """
+    if not entry_ids:
+        return ""
+
+    # Write IDs to a temp file for -entry_batch
+    # Use a predictable temp directory if available (SLURM)
+    tmpdir = os.environ.get("SLURM_TMPDIR", "/tmp")
+    os.makedirs(tmpdir, exist_ok=True)
+    batch_file = os.path.join(tmpdir, f"blastdbcmd_ids_{os.getpid()}.txt")
+
+    try:
+        with open(batch_file, "w") as f:
+            for eid in entry_ids:
+                f.write(eid + "\n")
+
+        cmd = [
+            blastdbcmd_path,
+            "-db", uniref90_path,
+            "-dbtype", "prot",
+            "-entry_batch", batch_file,
+            "-outfmt", "%f",  # FASTA
+        ]
+        proc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"blastdbcmd failed (exit={proc.returncode})\n"
+                f"Command: {' '.join(cmd)}\n"
+                f"stderr:\n{proc.stderr}\n"
+            )
+        return proc.stdout
+    finally:
+        try:
+            os.remove(batch_file)
+        except OSError:
+            pass
+
+
+def format_rawmsa_via_blastdbcmd(
+    prot_id: str,
+    rawmsa_file: str,
+    formatted_output_file: str,
+    blastdbcmd_path: str,
+    uniref90_path: str,
+    max_hits: int = 5000
+) -> int:
+    """
+    Convert PSI-BLAST raw output to a FASTA containing hit sequences by querying the BLAST DB.
+
+    Returns number of hit sequences written (not counting the query, which is handled elsewhere).
+    """
     if not os.path.exists(rawmsa_file):
-        # If PSI-BLAST failed, caller should have already errored out.
-        # If PSI-BLAST produced nothing (rare), treat as no hits.
         return 0
 
-    with open(rawmsa_file, 'r') as infile:
-        for line in infile:
-            if line.startswith('>'):
-                identifier = line.strip().split()[0]
-                if identifier.split('_')[1] != prot_id:
-                    identifiers_to_align.add(identifier)
+    hit_ids = _extract_hit_ids_from_rawmsa(prot_id, rawmsa_file)
+    if not hit_ids:
+        return 0
 
-    if len(identifiers_to_align) > 0:
-        with open(formatted_output_file, 'w') as outfile:
-            wrote = 0
-            for identifier in sorted(identifiers_to_align):
-                key = identifier.split('_')[1]
-                if key in seq_dict:
-                    outfile.write(identifier + '\n' + seq_dict[key] + '\n')
-                    wrote += 1
-            return wrote
-    return 0
+    # Optional cap to avoid insane MSAs
+    hit_ids = hit_ids[:max_hits]
+
+    # Try direct fetch first
+    fasta_text = _blastdbcmd_fetch_fasta(hit_ids, blastdbcmd_path, uniref90_path)
+
+    # If direct fetch returns empty (ID mismatch), fall back to the legacy underscore parsing
+    if not fasta_text.strip():
+        fallback_ids = []
+        for h in hit_ids:
+            parts = h.split("_")
+            if len(parts) >= 2:
+                fallback_ids.append(parts[1])
+        fallback_ids = fallback_ids[:max_hits]
+        fasta_text = _blastdbcmd_fetch_fasta(fallback_ids, blastdbcmd_path, uniref90_path)
+
+    if not fasta_text.strip():
+        # No sequences retrieved; treat as no hits
+        return 0
+
+    # Write retrieved FASTA to formatted_output_file
+    wrote = 0
+    with open(formatted_output_file, "w") as out:
+        for rec in SeqIO.parse(fasta_text.splitlines(True), "fasta"):
+            SeqIO.write(rec, out, "fasta")
+            wrote += 1
+
+    return wrote
 
 
 def run_clustal(clustal_input_file, clustal_output_file, clustalo_path, num_threads=6):
@@ -102,7 +202,6 @@ def run_clustal(clustal_input_file, clustal_output_file, clustalo_path, num_thre
                 f"stdout:\n{e.stdout}\n\nstderr:\n{e.stderr}\n"
             ) from e
     else:
-        # Only the query sequence
         subprocess.run(["cp", clustal_input_file, clustal_output_file], check=True)
 
 
@@ -146,7 +245,15 @@ def format_clustal(clustal_output_file, formatted_output_file):
         f.write(outtxt)
 
 
-def gen_msa(prot_id, prot_seq, rawmsa_file, seq_dict, output_dir, clustalo_path):
+def gen_msa(prot_id, prot_seq, rawmsa_file, output_dir, clustalo_path, blastdbcmd_path, uniref90_path):
+    """
+    Generate .msa file for a protein:
+      - Parse PSI-BLAST output (.rawmsa)
+      - Fetch hit sequences using blastdbcmd from the BLAST DB
+      - Run clustalo and post-process
+
+    This version does NOT require loading uniref90.fasta into RAM.
+    """
     formatted_fasta_file = os.path.join(output_dir, prot_id + '_rawmsa.fasta')
     clustal_input_file = os.path.join(output_dir, prot_id + '.clustal_input')
     clustal_output_file = os.path.join(output_dir, prot_id + '.clustal')
@@ -154,7 +261,13 @@ def gen_msa(prot_id, prot_seq, rawmsa_file, seq_dict, output_dir, clustalo_path)
 
     os.makedirs(output_dir, exist_ok=True)
 
-    n_hits_written = format_rawmsa(prot_id, rawmsa_file, seq_dict, formatted_fasta_file)
+    if not os.path.exists(formatted_fasta_file):
+        n_hits_written = format_rawmsa_via_blastdbcmd(
+            prot_id, rawmsa_file, formatted_fasta_file, blastdbcmd_path, uniref90_path
+        )
+    else:
+        # If already created, assume it has hits
+        n_hits_written = 1
 
     # If no hits were written, still create a trivial "MSA" with only the query.
     if n_hits_written == 0:
@@ -182,10 +295,6 @@ def gen_msa(prot_id, prot_seq, rawmsa_file, seq_dict, output_dir, clustalo_path)
 
 
 def use_hhblits(seq_name, fasta_file, hhblits_path, uniRef30_path, hhm_dir, cpu: int = 16):
-    """
-    Run hhblits and generate {hhm_dir}/{seq_name}.hhm.
-    Raises a RuntimeError with a clear message if hhblits fails.
-    """
     os.makedirs(hhm_dir, exist_ok=True)
     out_hhm = os.path.join(hhm_dir, seq_name + ".hhm")
     if os.path.exists(out_hhm):

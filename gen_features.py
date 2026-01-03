@@ -21,15 +21,13 @@ foldx_path = './software/foldx'
 # Auto-detect conda-installed tools on PATH; fall back to binary names if not found.
 dssp_path = shutil.which('mkdssp') or 'mkdssp'
 psi_path = shutil.which('psiblast') or 'psiblast'
+blastdbcmd_path = shutil.which('blastdbcmd') or 'blastdbcmd'
 clustalo_path = shutil.which('clustalo') or 'clustalo'
 hhblits_path = shutil.which('hhblits') or 'hhblits'
 freesasa_path = shutil.which('freesasa') or 'freesasa'
 
-# Databases: still need explicit locations (not provided by conda).
-# Uniref90 BLAST DB prefix (directory or prefix created with makeblastdb)
+# Databases
 uniref90_path = '/scratch/amoldwin/datasets/uniref90/uniref90'
-
-# HHblits UniRef30 directory; prefer environment variable if present.
 uniRef30_path = os.environ.get('HHBLITS_DB', './software/database/uniref30/UniRef30_2022_02')
 
 # Naccess is NOT conda-installable. Use 'freesasa' backend if you don't have Naccess.
@@ -87,7 +85,7 @@ def _ensure_dirs(dir):
     return row_pdb_dir, cleaned_pdb_dir, fasta_dir, pssm_dir, msa_dir, hhm_dir, sasa_dir, esm_dir, input_dir
 
 
-def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir, seq_dict,
+def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
                  sasa_backend='naccess', step='all', mutator_backend='foldx'):
     """
     step: one of ['all', 'structures', 'precompute', 'esm2', 'assemble']
@@ -122,7 +120,6 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir, seq_dict,
             if mutated_by_structure:
                 _ = use_freesasa(mut_pdb, sasa_dir, freesasa_path)
             else:
-                # Clone wild SASA to mutant-named files
                 mut_frsa = os.path.join(sasa_dir, f'{mut_id}.rsa')
                 mut_fasa = os.path.join(sasa_dir, f'{mut_id}.asa')
                 if not os.path.exists(mut_frsa):
@@ -147,10 +144,10 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir, seq_dict,
         wild_frawmsa, wild_fpssm = use_psiblast(wild_fasta, pssm_dir, psi_path, uniref90_path)
         mut_frawmsa, mut_fpssm = use_psiblast(mut_fasta, pssm_dir, psi_path, uniref90_path)
 
-        # MSA
+        # MSA (low-memory: fetch hits via blastdbcmd)
         print('Generating MSA files ...')
-        _ = gen_msa(pdb_chain, wild_seq, wild_frawmsa, seq_dict, msa_dir, clustalo_path)
-        _ = gen_msa(mut_id, mut_seq, mut_frawmsa, seq_dict, msa_dir, clustalo_path)
+        _ = gen_msa(pdb_chain, wild_seq, wild_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
+        _ = gen_msa(mut_id, mut_seq, mut_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
 
         # HHblits
         print('Using hhblits ...')
@@ -227,8 +224,8 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir, seq_dict,
         print('MSA missing; generating ...')
         wild_frawmsa = os.path.join(pssm_dir, f'{pdb_chain}.rawmsa')
         mut_frawmsa = os.path.join(pssm_dir, f'{mut_id}.rawmsa')
-        wild_fmsa = gen_msa(pdb_chain, wild_seq, wild_frawmsa, seq_dict, msa_dir, clustalo_path)
-        mut_fmsa = gen_msa(mut_id, mut_seq, mut_frawmsa, seq_dict, msa_dir, clustalo_path)
+        wild_fmsa = gen_msa(pdb_chain, wild_seq, wild_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
+        mut_fmsa = gen_msa(mut_id, mut_seq, mut_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
     wild_res_freq = calc_res_freq(wild_fmsa)
     mut_res_freq = calc_res_freq(mut_fmsa)
 
@@ -335,24 +332,6 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir, seq_dict,
     np.save(extra_feat_mt_path, mut_mb_data)
 
 
-def gen_seq_dict(uniref90_fasta_path= '/scratch/amoldwin/datasets/uniref90.fasta'):
-    seq_dict = {}
-    print('Reading uniref90.fasta ...')
-    with open(uniref90_fasta_path, 'r') as f_r:
-        seq = ''
-        for line in f_r:
-            if line.startswith('>'):
-                if seq:
-                    seq_dict[identifier] = seq
-                identifier = line.strip().split()[0].split('_')[1]
-                seq = ''
-            else:
-                seq += line.strip()
-        seq_dict[identifier] = seq
-    print('finished reading!')
-    return seq_dict
-
-
 def main():
     parser = argparse.ArgumentParser(description='Step-aware feature generation for PILOT')
     parser.add_argument('-i', '--mutant-list', dest='mutant_list', type=str, required=True,
@@ -366,16 +345,12 @@ def main():
                         choices=['naccess', 'freesasa'], help='SASA backend to use.')
     parser.add_argument('--freesasa-path', dest='freesasa_path', type=str, default='freesasa',
                         help='Path to freesasa binary if not on PATH.')
-    parser.add_argument('--uniref90-fasta', dest='uniref90_fasta', type=str,
-                        default='/scratch/amoldwin/datasets/uniref90.fasta', help='Path to uniref90.fasta')
     parser.add_argument('--mutator-backend', dest='mutator_backend', type=str, default='foldx',
                         choices=['foldx', 'proxy'], help='Mutant structure builder: foldx or proxy (no structural change)')
     args = parser.parse_args()
 
     global freesasa_path
     freesasa_path = args.freesasa_path
-
-    seq_dict = gen_seq_dict(args.uniref90_fasta)
 
     with open(args.mutant_list, 'r') as f_r:
         for lnum, line in enumerate(f_r, 1):
@@ -392,7 +367,7 @@ def main():
                                  f'expected like H/S, got {aa_field!r}')
             wild_type = aa_field[0]
             mutant = aa_field[-1]
-            gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, args.dir, seq_dict,
+            gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, args.dir,
                          sasa_backend=args.sasa_backend, step=args.step, mutator_backend=args.mutator_backend)
 
 if __name__ == "__main__":
