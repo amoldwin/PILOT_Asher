@@ -13,8 +13,7 @@
 #SBATCH --time=02-00:00:00
 
 # IMPORTANT: set to 0-(N-1)%MAX_CONCURRENT
-#SBATCH --array=0-4999%200
-
+#SBATCH --array=0-5372%200
 set -euo pipefail
 
 MUT_LIST="${1:?Usage: sbatch scripts/precompute_psiblast_msa_array.sh MUT_LIST FEATURE_DIR [SASA_BACKEND]}"

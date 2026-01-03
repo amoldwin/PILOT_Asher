@@ -2,7 +2,7 @@ import os
 import subprocess
 import numpy as np
 from Bio import SeqIO
-
+import io
 
 def _slurm_cpus(default: int) -> int:
     v = os.environ.get("SLURM_CPUS_PER_TASK")
@@ -174,13 +174,12 @@ def format_rawmsa_via_blastdbcmd(
         fasta_text = _blastdbcmd_fetch_fasta(fallback_ids, blastdbcmd_path, uniref90_path)
 
     if not fasta_text.strip():
-        # No sequences retrieved; treat as no hits
         return 0
 
-    # Write retrieved FASTA to formatted_output_file
     wrote = 0
     with open(formatted_output_file, "w") as out:
-        for rec in SeqIO.parse(fasta_text.splitlines(True), "fasta"):
+        handle = io.StringIO(fasta_text)
+        for rec in SeqIO.parse(handle, "fasta"):
             SeqIO.write(rec, out, "fasta")
             wrote += 1
 

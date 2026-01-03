@@ -13,7 +13,8 @@
 #SBATCH --time=02-00:00:00
 
 # IMPORTANT: set to 0-(N-1)%MAX_CONCURRENT
-#SBATCH --array=0-4999%400
+#SBATCH --array=0-5372%400
+
 
 set -euo pipefail
 
