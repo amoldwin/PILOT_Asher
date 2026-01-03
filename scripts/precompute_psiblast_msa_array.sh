@@ -20,8 +20,10 @@ MUT_LIST=${1:?Usage: sbatch ... precompute_psiblast_msa_array.sh MUT_LIST FEATUR
 FEATURE_DIR=${2:?Usage: sbatch ... precompute_psiblast_msa_array.sh MUT_LIST FEATURE_DIR [SASA_BACKEND]}
 SASA_BACKEND=${3:-freesasa}
 
-source ../miniconda/bin/activate
+# Adjust this path to your conda install (yours seems to be ~/PROJECTS/miniconda)
+source /projects/ashehu/amoldwin/miniconda/etc/profile.d/conda.sh
 conda activate pilot
+
 
 FILTERED=$(mktemp)
 trap 'rm -f "${FILTERED}"' EXIT

@@ -19,8 +19,10 @@ set -euo pipefail
 MUT_LIST=${1:?Usage: sbatch ... precompute_hhblits_array.sh MUT_LIST FEATURE_DIR}
 FEATURE_DIR=${2:?Usage: sbatch ... precompute_hhblits_array.sh MUT_LIST FEATURE_DIR}
 
-source ../miniconda/bin/activate
+source /projects/ashehu/amoldwin/miniconda/etc/profile.d/conda.sh
 conda activate pilot
+
+
 
 export HHBLITS_DB=/scratch/amoldwin/datasets/Uniref30/UniRef30_2021_03
 
