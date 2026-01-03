@@ -27,7 +27,7 @@ freesasa_path = shutil.which('freesasa') or 'freesasa'
 
 # Databases: still need explicit locations (not provided by conda).
 # Uniref90 BLAST DB prefix (directory or prefix created with makeblastdb)
-uniref90_path = '/scratch/amoldwin/datasets/uniref90'
+uniref90_path = '/scratch/amoldwin/datasets/uniref90/uniref90'
 
 # HHblits UniRef30 directory; prefer environment variable if present.
 uniRef30_path = os.environ.get('HHBLITS_DB', './software/database/uniref30/UniRef30_2022_02')

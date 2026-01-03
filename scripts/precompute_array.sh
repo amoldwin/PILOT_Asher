@@ -6,7 +6,7 @@
 #SBATCH --mail-type=BEGIN,END,FAIL
 
 # Adjust these to your CPU partition/qos
-#SBATCH --partition=contrib
+#SBATCH --partition=normal
 #SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --mem=128G
@@ -28,7 +28,7 @@ SASA_BACKEND=freesasa
 
 source ../miniconda/bin/activate
 conda activate pilot
-export HHBLITS_DB=/scratch/amoldwin/datasets/Uniref30
+export HHBLITS_DB=/scratch/amoldwin/datasets/Uniref30/UniRef30_2021_03
 UNIREF30_DIR=/scratch/amoldwin/datasets/Uniref30/UniRef30_2021_03
 
 # Select line after filtering out blank/comment lines (0-based index)
