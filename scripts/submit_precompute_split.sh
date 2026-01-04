@@ -18,11 +18,14 @@ LAST=$((N-1))
 echo "Usable lines: N=$N => array 0-$LAST"
 echo "Throttles: psiblast_msa=%${PSI_THROTTLE}, hhblits=%${HH_THROTTLE}"
 
-PSIJOB=$(sbatch --array=0-${LAST}%${PSI_THROTTLE} \
-  scripts/precompute_psiblast_msa_array.sh "$MUT_LIST" "$FEATURE_DIR" "$SASA_BACKEND" | awk '{print $4}')
+##PSIJOB=$(sbatch --array=0-${LAST}%${PSI_THROTTLE} \
+  ##scripts/precompute_psiblast_msa_array.sh "$MUT_LIST" "$FEATURE_DIR" "$SASA_BACKEND" | awk '{print $4}')
 
-HHJOB=$(sbatch --dependency=afterok:${PSIJOB} --array=0-${LAST}%${HH_THROTTLE} \
-  scripts/precompute_hhblits_array.sh "$MUT_LIST" "$FEATURE_DIR" | awk '{print $4}')
+##HHJOB=$(sbatch --dependency=afterok:${PSIJOB} --array=0-${LAST}%${HH_THROTTLE} \
+##  scripts/precompute_hhblits_array.sh "$MUT_LIST" "$FEATURE_DIR" | awk '{print $4}')
+  
+HHJOB=$(sbatch  --array=0-${LAST}%${HH_THROTTLE} \
+  scripts/precompute_hhblits_array.sh "$MUT_LIST" "$FEATURE_DIR" | awk '{print $4}')  
 
-echo "Submitted: psiblast+msa=${PSIJOB}"
-echo "Submitted: hhblits-only=${HHJOB} (afterok on ${PSIJOB})"
+##echo "Submitted: psiblast+msa=${PSIJOB}"
+##echo "Submitted: hhblits-only=${HHJOB} (afterok on ${PSIJOB})"

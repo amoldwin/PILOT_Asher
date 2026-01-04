@@ -11,7 +11,7 @@
 #SBATCH --gres=gpu:A100.80gb:1
 #SBATCH --mem=128G
 #SBATCH --time=01-00:30:00
-#SBATCH --array=0-15
+#SBATCH --array=0-10
 
 # Usage: sbatch slurm_esm2_array.sh ./mutation_list.txt /features
 MUT_LIST=$1
