@@ -251,21 +251,85 @@ def format_clustal(clustal_output_file, formatted_output_file):
         f.write(outtxt)
 
 
-def _acquire_lock(lock_path: str, timeout_sec: int = 1800, poll_sec: float = 2.0):
+# -------------------------
+# Locking helpers (stale-aware)
+# -------------------------
+def _pid_is_alive(pid: int) -> bool:
+    """Best-effort: check whether a PID is alive on this node."""
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # exists but not ours
+        return True
+
+
+def _acquire_lock(lock_path: str, timeout_sec: int = 1800, poll_sec: float = 2.0, stale_sec: int = 7200):
     """
-    Cross-process lock using atomic file create (O_EXCL).
-    Prevents concurrent array tasks from clobbering the same MSA intermediates.
+    Cross-process lock using atomic file create (O_EXCL), with stale lock eviction.
+
+    - timeout_sec: how long to wait before giving up
+    - stale_sec: if lock file older than this, consider it stale and remove
     """
     start = time.time()
+    last_notice = 0.0
+
     while True:
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode("utf-8"))
+            os.write(fd, f"{os.getpid()}\n".encode("utf-8"))
             os.close(fd)
             return
         except FileExistsError:
-            if time.time() - start > timeout_sec:
-                raise TimeoutError(f"Timed out waiting for lock: {lock_path}")
+            # Stat lock (may disappear between checks)
+            try:
+                st = os.stat(lock_path)
+                age = time.time() - st.st_mtime
+            except FileNotFoundError:
+                continue
+
+            # Read PID from lock file
+            lock_pid = None
+            try:
+                with open(lock_path, "r") as f:
+                    first = f.read().strip().splitlines()[0]
+                    lock_pid = int(first)
+            except Exception:
+                lock_pid = None
+
+            pid_alive = _pid_is_alive(lock_pid)
+
+            # If process is definitely gone, evict stale lock
+            if (lock_pid is not None) and (not pid_alive) and age >= 10:
+                try:
+                    os.remove(lock_path)
+                    continue
+                except OSError:
+                    pass
+
+            # Age-based eviction backstop
+            if age > stale_sec:
+                try:
+                    os.remove(lock_path)
+                    continue
+                except OSError:
+                    pass
+
+            now = time.time()
+            if now - start > timeout_sec:
+                raise TimeoutError(
+                    f"Timed out waiting for lock: {lock_path} "
+                    f"(age={age:.0f}s pid={lock_pid} alive={pid_alive})"
+                )
+
+            # (optional) emit occasional note; keep disabled to reduce log spam
+            if now - last_notice > 300:
+                last_notice = now
+
             time.sleep(poll_sec)
 
 
@@ -309,7 +373,6 @@ def gen_msa(prot_id, prot_seq, rawmsa_file, output_dir, clustalo_path, blastdbcm
                 prot_id, rawmsa_file, formatted_fasta_file, blastdbcmd_path, uniref90_path
             )
         else:
-            # If it exists, assume it has content; if empty we will fall back below
             n_hits_written = 1 if os.path.getsize(formatted_fasta_file) > 0 else 0
 
         # No hits -> trivial MSA with only query
