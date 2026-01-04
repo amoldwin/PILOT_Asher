@@ -9,25 +9,43 @@
 #SBATCH --qos=gpu
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:A100.80gb:1
-#SBATCH --mem=128G
+#SBATCH --mem=32G
 #SBATCH --time=01-00:30:00
-#SBATCH --array=0-10
+# Do NOT set --array here; pass via sbatch --array=0-9
 
-# Usage: sbatch slurm_esm2_array.sh ./mutation_list.txt /features
-MUT_LIST=$1
-FEATURE_DIR=$2
+set -euo pipefail
 
-source ../miniconda/bin/activate
+MUT_LIST=${1:?Usage: sbatch --array=0-9 scripts/esm2_array.sh MUT_LIST FEATURE_DIR}
+FEATURE_DIR=${2:?Usage: sbatch --array=0-9 scripts/esm2_array.sh MUT_LIST FEATURE_DIR}
+
+# Robust conda activation (batch-safe)
+source ~/PROJECTS/miniconda/etc/profile.d/conda.sh
 conda activate pilot
-export HHBLITS_DB=/scratch/amoldwin/datasets/Uniref30
 
-# Optional: set a local torch hub cache if you modify use_esm2.py to respect TORCH_HOME
-# export TORCH_HOME=/scratch/amoldwin/torch_cache
+# Cache torch hub downloads
+export TORCH_HOME=/scratch/amoldwin/torch_cache
 
-LINE=$(awk -v idx="${SLURM_ARRAY_TASK_ID}" 'NR==idx+1{print;exit}' "${MUT_LIST}")
-echo "ESM2: ${LINE}"
+TASK_ID=${SLURM_ARRAY_TASK_ID}
+NTASKS=${SLURM_ARRAY_TASK_COUNT:-10}
 
-python gen_features.py \
-  -i <(echo "${LINE}") \
-  -d "${FEATURE_DIR}" \
-  -s esm2
+# Filter blank/comment lines so indexing is stable
+FILTERED=$(mktemp)
+trap 'rm -f "${FILTERED}"' EXIT
+grep -vE '^\s*(#|$)' "${MUT_LIST}" > "${FILTERED}"
+
+N=$(wc -l < "${FILTERED}")
+echo "ESM2 chunk runner: task=${TASK_ID}/${NTASKS} total_lines=${N} host=$(hostname)"
+
+# Process every NTASKS-th line starting at TASK_ID (0-based)
+for ((i=TASK_ID; i<N; i+=NTASKS)); do
+  LINE=$(awk -v idx="$i" 'NR==idx+1{print;exit}' "${FILTERED}")
+  if [[ -z "${LINE}" ]]; then
+    continue
+  fi
+  echo "i=${i} LINE=${LINE}"
+
+  python gen_features.py \
+    -i <(echo "${LINE}") \
+    -d "${FEATURE_DIR}" \
+    -s esm2
+done
