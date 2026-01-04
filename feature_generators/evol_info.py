@@ -1,8 +1,10 @@
 import os
+import io
+import time
 import subprocess
 import numpy as np
 from Bio import SeqIO
-import io
+
 
 def _slurm_cpus(default: int) -> int:
     v = os.environ.get("SLURM_CPUS_PER_TASK")
@@ -14,12 +16,16 @@ def _slurm_cpus(default: int) -> int:
         return default
 
 
+# -------------------------
+# PSI-BLAST
+# -------------------------
 def use_psiblast(fasta_file, rawmsa_dir, psi_path, uniref90_path, num_threads: int = 16):
     """
     Run PSI-BLAST and generate:
-      - {rawmsa_dir}/{fasta_name}.rawmsa (pairwise alignment output)
+      - {rawmsa_dir}/{fasta_name}.rawmsa (pairwise output)
       - {rawmsa_dir}/{fasta_name}.pssm   (ASCII PSSM)
-    Raises a RuntimeError with a clear message if BLAST fails.
+
+    Raises a RuntimeError with stdout/stderr if BLAST fails.
     """
     fasta_name = os.path.basename(fasta_file).split('.')[0]
     rawmsa_file = os.path.join(rawmsa_dir, fasta_name + '.rawmsa')
@@ -61,28 +67,26 @@ def use_psiblast(fasta_file, rawmsa_dir, psi_path, uniref90_path, num_threads: i
     return rawmsa_file, pssm_file
 
 
+# -------------------------
+# MSA build via blastdbcmd (low-memory)
+# -------------------------
 def _extract_hit_ids_from_rawmsa(prot_id: str, rawmsa_file: str):
     """
-    Parse PSI-BLAST -out (pairwise) output and extract hit IDs (from '>' lines).
+    Parse PSI-BLAST pairwise output (.rawmsa) and extract hit identifiers from lines starting with '>'.
 
-    We return a list of IDs that can be passed to blastdbcmd -entry_batch.
-    This function intentionally supports multiple header styles.
+    Returns IDs in order (deduplicated) suitable for blastdbcmd -entry_batch.
     """
     ids = []
     with open(rawmsa_file, "r") as infile:
         for line in infile:
             if not line.startswith(">"):
                 continue
-            header = line.strip().split()[0]  # take first token
-            header = header.lstrip(">")
+            header = line.strip().split()[0].lstrip(">")
 
-            # Skip query itself if it appears
-            # Sometimes query id is embedded differently, so be conservative.
+            # Skip query if it appears (conservative)
             if prot_id in header:
                 continue
 
-            # Existing code assumed "..._<ID>" and used split('_')[1].
-            # Keep that behavior as a fallback, but prefer the full header first.
             ids.append(header)
 
     # Deduplicate while preserving order
@@ -97,15 +101,11 @@ def _extract_hit_ids_from_rawmsa(prot_id: str, rawmsa_file: str):
 
 def _blastdbcmd_fetch_fasta(entry_ids, blastdbcmd_path: str, uniref90_path: str) -> str:
     """
-    Fetch sequences for a list of entry IDs using blastdbcmd and return FASTA text.
-
-    Uses -entry_batch for efficiency (one process call).
+    Fetch sequences for entry IDs using blastdbcmd -entry_batch; return FASTA text.
     """
     if not entry_ids:
         return ""
 
-    # Write IDs to a temp file for -entry_batch
-    # Use a predictable temp directory if available (SLURM)
     tmpdir = os.environ.get("SLURM_TMPDIR", "/tmp")
     os.makedirs(tmpdir, exist_ok=True)
     batch_file = os.path.join(tmpdir, f"blastdbcmd_ids_{os.getpid()}.txt")
@@ -120,7 +120,7 @@ def _blastdbcmd_fetch_fasta(entry_ids, blastdbcmd_path: str, uniref90_path: str)
             "-db", uniref90_path,
             "-dbtype", "prot",
             "-entry_batch", batch_file,
-            "-outfmt", "%f",  # FASTA
+            "-outfmt", "%f",
         ]
         proc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if proc.returncode != 0:
@@ -143,12 +143,12 @@ def format_rawmsa_via_blastdbcmd(
     formatted_output_file: str,
     blastdbcmd_path: str,
     uniref90_path: str,
-    max_hits: int = 5000
+    max_hits: int = 500,
 ) -> int:
     """
-    Convert PSI-BLAST raw output to a FASTA containing hit sequences by querying the BLAST DB.
+    Convert PSI-BLAST pairwise output to a FASTA containing hit sequences fetched from the BLAST DB.
 
-    Returns number of hit sequences written (not counting the query, which is handled elsewhere).
+    Returns number of hit sequences written (does not include the query sequence).
     """
     if not os.path.exists(rawmsa_file):
         return 0
@@ -157,21 +157,20 @@ def format_rawmsa_via_blastdbcmd(
     if not hit_ids:
         return 0
 
-    # Optional cap to avoid insane MSAs
     hit_ids = hit_ids[:max_hits]
 
-    # Try direct fetch first
+    # Try direct header IDs first
     fasta_text = _blastdbcmd_fetch_fasta(hit_ids, blastdbcmd_path, uniref90_path)
 
-    # If direct fetch returns empty (ID mismatch), fall back to the legacy underscore parsing
+    # Fallback: if headers look like "..._<ID>" use split('_')[1]
     if not fasta_text.strip():
-        fallback_ids = []
+        fallback = []
         for h in hit_ids:
             parts = h.split("_")
             if len(parts) >= 2:
-                fallback_ids.append(parts[1])
-        fallback_ids = fallback_ids[:max_hits]
-        fasta_text = _blastdbcmd_fetch_fasta(fallback_ids, blastdbcmd_path, uniref90_path)
+                fallback.append(parts[1])
+        fallback = fallback[:max_hits]
+        fasta_text = _blastdbcmd_fetch_fasta(fallback, blastdbcmd_path, uniref90_path)
 
     if not fasta_text.strip():
         return 0
@@ -187,11 +186,19 @@ def format_rawmsa_via_blastdbcmd(
 
 
 def run_clustal(clustal_input_file, clustal_output_file, clustalo_path, num_threads=6):
-    with open(clustal_input_file, 'r') as f:
+    with open(clustal_input_file, "r") as f:
+        # FASTA expected: 2 lines per record at minimum, but sequences can wrap.
+        # This heuristic is imperfect but used in the original code.
         numseqs = len(f.readlines()) / 2
 
     if numseqs > 1:
-        cmd = [clustalo_path, "-i", clustal_input_file, "-o", clustal_output_file, "--force", "--threads", str(num_threads)]
+        cmd = [
+            clustalo_path,
+            "-i", clustal_input_file,
+            "-o", clustal_output_file,
+            "--force",
+            "--threads", str(num_threads)
+        ]
         try:
             subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         except subprocess.CalledProcessError as e:
@@ -206,94 +213,147 @@ def run_clustal(clustal_input_file, clustal_output_file, clustalo_path, num_thre
 
 def format_clustal(clustal_output_file, formatted_output_file):
     msa_info = []
-    with open(clustal_output_file, 'r') as f:
-        seq_name = ''
-        seq = ''
+    with open(clustal_output_file, "r") as f:
+        seq_name = ""
+        seq = ""
         for line in f:
-            if line.startswith('>'):
+            if line.startswith(">"):
                 if seq_name:
                     msa_info.append(seq_name)
                     msa_info.append(seq)
                 seq_name = line.strip()
-                seq = ''
+                seq = ""
             else:
                 seq += line.strip()
         msa_info.append(seq_name)
-        msa_info.append(seq.replace('U', '-'))
+        msa_info.append(seq.replace("U", "-"))
 
-    outtxt = ''
+    outtxt = ""
     gaps = []
     for idx, line in enumerate(msa_info):
         if idx % 2 == 0:
-            outtxt += line + '\n'
+            outtxt += line + "\n"
         elif idx == 1:
             for i in range(len(line)):
-                gaps.append(line[i] == '-')
+                gaps.append(line[i] == "-")
 
         if idx % 2 == 1:
-            newseq = ''
+            newseq = ""
             for i in range(len(gaps)):
                 if not gaps[i]:
                     if i < len(line):
                         newseq += line[i]
                     else:
-                        newseq += '-'
-            outtxt += newseq + '\n'
+                        newseq += "-"
+            outtxt += newseq + "\n"
 
-    with open(formatted_output_file, 'w') as f:
+    with open(formatted_output_file, "w") as f:
         f.write(outtxt)
+
+
+def _acquire_lock(lock_path: str, timeout_sec: int = 1800, poll_sec: float = 2.0):
+    """
+    Cross-process lock using atomic file create (O_EXCL).
+    Prevents concurrent array tasks from clobbering the same MSA intermediates.
+    """
+    start = time.time()
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("utf-8"))
+            os.close(fd)
+            return
+        except FileExistsError:
+            if time.time() - start > timeout_sec:
+                raise TimeoutError(f"Timed out waiting for lock: {lock_path}")
+            time.sleep(poll_sec)
+
+
+def _release_lock(lock_path: str):
+    try:
+        os.remove(lock_path)
+    except FileNotFoundError:
+        pass
 
 
 def gen_msa(prot_id, prot_seq, rawmsa_file, output_dir, clustalo_path, blastdbcmd_path, uniref90_path):
     """
     Generate .msa file for a protein:
       - Parse PSI-BLAST output (.rawmsa)
-      - Fetch hit sequences using blastdbcmd from the BLAST DB
+      - Fetch hit sequences with blastdbcmd (no uniref90.fasta in RAM)
       - Run clustalo and post-process
 
-    This version does NOT require loading uniref90.fasta into RAM.
+    Safe for SLURM arrays: uses a per-prot lock to avoid file collisions.
     """
-    formatted_fasta_file = os.path.join(output_dir, prot_id + '_rawmsa.fasta')
-    clustal_input_file = os.path.join(output_dir, prot_id + '.clustal_input')
-    clustal_output_file = os.path.join(output_dir, prot_id + '.clustal')
-    formatted_clustal_file = os.path.join(output_dir, prot_id + '.msa')
+    formatted_fasta_file = os.path.join(output_dir, prot_id + "_rawmsa.fasta")
+    clustal_input_file = os.path.join(output_dir, prot_id + ".clustal_input")
+    clustal_output_file = os.path.join(output_dir, prot_id + ".clustal")
+    formatted_clustal_file = os.path.join(output_dir, prot_id + ".msa")
 
     os.makedirs(output_dir, exist_ok=True)
 
-    if not os.path.exists(formatted_fasta_file):
-        n_hits_written = format_rawmsa_via_blastdbcmd(
-            prot_id, rawmsa_file, formatted_fasta_file, blastdbcmd_path, uniref90_path
-        )
-    else:
-        # If already created, assume it has hits
-        n_hits_written = 1
-
-    # If no hits were written, still create a trivial "MSA" with only the query.
-    if n_hits_written == 0:
-        if not os.path.exists(formatted_clustal_file):
-            with open(formatted_clustal_file, "w") as out:
-                out.write(f">{prot_id}\n{prot_seq}\n")
+    # Fast path: final MSA already exists
+    if os.path.exists(formatted_clustal_file) and os.path.getsize(formatted_clustal_file) > 0:
         return formatted_clustal_file
 
-    if not os.path.exists(clustal_input_file):
-        with open(formatted_fasta_file, 'r') as infile:
-            lines = infile.readlines()
+    lock_path = os.path.join(output_dir, f".{prot_id}.msa.lock")
+    _acquire_lock(lock_path)
+    try:
+        # Re-check after waiting
+        if os.path.exists(formatted_clustal_file) and os.path.getsize(formatted_clustal_file) > 0:
+            return formatted_clustal_file
 
-        with open(clustal_input_file, 'w') as outfile:
-            outfile.write('>' + prot_id + '\n' + prot_seq + '\n')
-            for line in lines:
-                outfile.write(line)
+        # Build hit FASTA (if missing)
+        if not os.path.exists(formatted_fasta_file):
+            n_hits_written = format_rawmsa_via_blastdbcmd(
+                prot_id, rawmsa_file, formatted_fasta_file, blastdbcmd_path, uniref90_path
+            )
+        else:
+            # If it exists, assume it has content; if empty we will fall back below
+            n_hits_written = 1 if os.path.getsize(formatted_fasta_file) > 0 else 0
 
-        threads = _slurm_cpus(6)
-        run_clustal(clustal_input_file, clustal_output_file, clustalo_path, num_threads=threads)
+        # No hits -> trivial MSA with only query
+        if n_hits_written == 0:
+            with open(formatted_clustal_file, "w") as out:
+                out.write(f">{prot_id}\n{prot_seq}\n")
+            return formatted_clustal_file
 
-    if not os.path.exists(formatted_clustal_file):
-        format_clustal(clustal_output_file, formatted_clustal_file)
+        # Create clustal input that includes query at top
+        if not os.path.exists(clustal_input_file):
+            with open(formatted_fasta_file, "r") as infile:
+                hits = infile.read().strip()
+            with open(clustal_input_file, "w") as outfile:
+                outfile.write(f">{prot_id}\n{prot_seq}\n")
+                if hits:
+                    outfile.write(hits + "\n")
 
-    return formatted_clustal_file
+        # Run clustalo if needed
+        if not os.path.exists(clustal_output_file):
+            threads = _slurm_cpus(6)
+            run_clustal(clustal_input_file, clustal_output_file, clustalo_path, num_threads=threads)
+
+        # Hard check: clustalo must have produced output
+        if not os.path.exists(clustal_output_file):
+            raise FileNotFoundError(
+                f"clustalo did not create expected output: {clustal_output_file}\n"
+                f"Input: {clustal_input_file}\n"
+            )
+
+        if not os.path.exists(formatted_clustal_file):
+            format_clustal(clustal_output_file, formatted_clustal_file)
+
+        return formatted_clustal_file
+    finally:
+        _release_lock(lock_path)
 
 
+# -------------------------
+# HHblits
+# -------------------------
 def use_hhblits(seq_name, fasta_file, hhblits_path, uniRef30_path, hhm_dir, cpu: int = 16):
+    """
+    Run hhblits and generate {hhm_dir}/{seq_name}.hhm
+    """
     os.makedirs(hhm_dir, exist_ok=True)
     out_hhm = os.path.join(hhm_dir, seq_name + ".hhm")
     if os.path.exists(out_hhm):
@@ -317,9 +377,12 @@ def use_hhblits(seq_name, fasta_file, hhblits_path, uniRef30_path, hhm_dir, cpu:
     return out_hhm
 
 
+# -------------------------
+# PSSM/HHM parsing + MSA stats
+# -------------------------
 def get_pssm(pssm_path):
     pssm_dict, new_pssm_dict, res_dict = {}, {}, {}
-    with open(pssm_path, 'r') as f_r:
+    with open(pssm_path, "r") as f_r:
         next(f_r)
         next(f_r)
         next(f_r)
@@ -339,14 +402,14 @@ def get_pssm(pssm_path):
 
 
 def process_hhm(path):
-    with open(path, 'r') as fin:
+    with open(path, "r") as fin:
         fin_data = fin.readlines()
         hhm_begin_line = 0
         hhm_end_line = 0
         for i in range(len(fin_data)):
-            if '#' in fin_data[i]:
+            if "#" in fin_data[i]:
                 hhm_begin_line = i + 5
-            elif '//' in fin_data[i]:
+            elif "//" in fin_data[i]:
                 hhm_end_line = i
         feature = np.zeros([int((hhm_end_line - hhm_begin_line) / 3), 30])
         axis_x = 0
@@ -355,16 +418,10 @@ def process_hhm(path):
             line2 = fin_data[i + 1].split()
             axis_y = 0
             for j in line1:
-                if j == '*':
-                    feature[axis_x][axis_y] = 9999 / 10000.0
-                else:
-                    feature[axis_x][axis_y] = float(j) / 10000.0
+                feature[axis_x][axis_y] = (9999 if j == "*" else float(j)) / 10000.0
                 axis_y += 1
             for j in line2:
-                if j == '*':
-                    feature[axis_x][axis_y] = 9999 / 10000.0
-                else:
-                    feature[axis_x][axis_y] = float(j) / 10000.0
+                feature[axis_x][axis_y] = (9999 if j == "*" else float(j)) / 10000.0
                 axis_y += 1
             axis_x += 1
         feature = (feature - np.min(feature)) / (np.max(feature) - np.min(feature))
@@ -373,7 +430,7 @@ def process_hhm(path):
 
 def loadAASeq(infile):
     seqs = []
-    for i in SeqIO.parse(infile, 'fasta'):
+    for i in SeqIO.parse(infile, "fasta"):
         seqs.append(i.seq)
     return seqs, len(seqs[0])
 

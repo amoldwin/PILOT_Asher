@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-## bash scripts/submit_precompute_split.sh dataset/mutation_list_test.txt /scratch/amoldwin/datasets/PILOT freesasaset -euo pipefail
+## bash scripts/submit_precompute_split.sh dataset/mutation_list.txt /scratch/amoldwin/datasets/PILOT freesasa
 
 MUT_LIST=${1:?Usage: ./scripts/submit_precompute_split.sh MUT_LIST FEATURE_DIR [SASA_BACKEND] [PSI_THROTTLE] [HH_THROTTLE]}
 FEATURE_DIR=${2:?Usage: ./scripts/submit_precompute_split.sh MUT_LIST FEATURE_DIR [SASA_BACKEND] [PSI_THROTTLE] [HH_THROTTLE]}
