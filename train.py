@@ -2,7 +2,7 @@ import os
 import argparse
 import random
 from dataclasses import dataclass
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 
 import numpy as np
 import torch
@@ -47,19 +47,46 @@ def mut_id_from_row(pdb: str, chain: str, mut_pos: str, residue_field: str):
 
 
 # -------------------------
+# RN feature layout (from feature_generators/feature_alignment.py)
+# RN is 105 dims:
+#   aa_code(20) + ss(3) + depth(1) + properties(7) + sasa(1) + pssm(20) + hhm(30) + msa_freq(21) + cons_score(1) + is_mut(1)
+# Indices below are [start:end) Python slices.
+# -------------------------
+RN_AA = slice(0, 20)
+RN_SS = slice(20, 23)
+RN_DEPTH = slice(23, 24)
+RN_PROP = slice(24, 31)
+RN_SASA = slice(31, 32)
+RN_PSSM = slice(32, 52)
+RN_HHM = slice(52, 82)
+RN_MSA_FREQ = slice(82, 103)
+RN_MSA_CONS = slice(103, 104)
+RN_IS_MUT = slice(104, 105)
+
+
+# -------------------------
 # Ablations
 # -------------------------
 @dataclass(frozen=True)
 class Ablations:
+    # coarse modality ablations (existing)
     no_residue_nodes: bool = False    # zero RN (except is_mut flag)
     no_residue_edges: bool = False    # zero RE
     no_atom_nodes: bool = False       # zero AN
     no_atom_edges: bool = False       # zero AE
     no_esm2: bool = False             # zero EF
 
+    # fine-grained RN sub-feature ablations (new)
+    no_pssm: bool = False
+    no_hhm: bool = False
+    no_msa_freq: bool = False
+    no_msa_cons: bool = False
+
 
 def ablation_tag(abl: Ablations) -> str:
     tags = []
+
+    # coarse
     if abl.no_residue_nodes:
         tags.append("no_residue_nodes")
     if abl.no_residue_edges:
@@ -70,6 +97,17 @@ def ablation_tag(abl: Ablations) -> str:
         tags.append("no_atom_edges")
     if abl.no_esm2:
         tags.append("no_esm2")
+
+    # fine-grained (RN content)
+    if abl.no_pssm:
+        tags.append("no_pssm")
+    if abl.no_hhm:
+        tags.append("no_hhm")
+    if abl.no_msa_freq:
+        tags.append("no_msa_freq")
+    if abl.no_msa_cons:
+        tags.append("no_msa_cons")
+
     if not tags:
         return "full"
     return "+".join(tags)
@@ -109,6 +147,28 @@ class PilotNPYDataset(Dataset):
     def __len__(self):
         return len(self.rows)
 
+    def _apply_rn_ablations(self, res_x: np.ndarray, abl: Ablations) -> np.ndarray:
+        """
+        res_x: (16,105) float array, already standardized for [:,:-1]
+        """
+        if abl.no_residue_nodes:
+            # keep is_mut marker so the model can still locate mutpos
+            res_x[:, :-1] = 0.0
+            return res_x
+
+        # Fine-grained MSA/evol ablations: these live inside RN.
+        # Only apply if we didn't already wipe RN entirely.
+        if abl.no_pssm:
+            res_x[:, RN_PSSM] = 0.0
+        if abl.no_hhm:
+            res_x[:, RN_HHM] = 0.0
+        if abl.no_msa_freq:
+            res_x[:, RN_MSA_FREQ] = 0.0
+        if abl.no_msa_cons:
+            res_x[:, RN_MSA_CONS] = 0.0
+
+        return res_x
+
     def _load_one(self, mut_id: str, suffix: str, abl: Ablations):
         """
         suffix in {"wt","mt"}
@@ -135,10 +195,9 @@ class PilotNPYDataset(Dataset):
         res_e = Normalization(res_e)
         atom_e = Normalization(atom_e)
 
-        # apply ablations (zero-out modality content)
-        if abl.no_residue_nodes:
-            # keep the "is_mut" marker so mutpos can still be found
-            res_x[:, :-1] = 0.0
+        # apply ablations
+        res_x = self._apply_rn_ablations(res_x, abl)
+
         if abl.no_residue_edges:
             res_e[:] = 0.0
         if abl.no_atom_nodes:
@@ -166,8 +225,7 @@ class PilotNPYDataset(Dataset):
         pdb, chain, mut_pos, residue, y = self.rows[idx]
         mut_id, _, _ = mut_id_from_row(pdb, chain, mut_pos, residue)
 
-        # Ablations will be applied in the training loop via a closure-like attribute.
-        # We set this attribute from outside (see make_loader()).
+        # Ablations are applied via dataset attribute set by make_loader()
         abl: Ablations = getattr(self, "_ablations", Ablations())
 
         wt = self._load_one(mut_id, "wt", abl)
@@ -364,12 +422,19 @@ def main():
     ap.add_argument("--job-id", type=str, required=True,
                     help="Identifier used to prefix saved artifacts (checkpoints + test CSV).")
 
-    # modality ablations
-    ap.add_argument("--no_residue_nodes", action="store_true", help="Zero-out residue node features RN (except is_mut).")
+    # coarse modality ablations
+    ap.add_argument("--no_residue_nodes", action="store_true",
+                    help="Zero-out residue node features RN (except is_mut). This also removes MSA/PSSM/HHM since they live inside RN.")
     ap.add_argument("--no_residue_edges", action="store_true", help="Zero-out residue edge features RE.")
     ap.add_argument("--no_atom_nodes", action="store_true", help="Zero-out atom node features AN.")
     ap.add_argument("--no_atom_edges", action="store_true", help="Zero-out atom edge features AE.")
     ap.add_argument("--no_esm2", action="store_true", help="Zero-out ESM2 residue embeddings EF.")
+
+    # fine-grained RN sub-feature ablations (MSA/evolutionary content)
+    ap.add_argument("--no_pssm", action="store_true", help="Zero-out the PSSM block inside RN (dims 32:52).")
+    ap.add_argument("--no_hhm", action="store_true", help="Zero-out the HHM block inside RN (dims 52:82).")
+    ap.add_argument("--no_msa_freq", action="store_true", help="Zero-out the MSA residue frequency block inside RN (dims 82:103).")
+    ap.add_argument("--no_msa_cons", action="store_true", help="Zero-out the MSA conservation score inside RN (dim 103).")
 
     ap.add_argument("--out-dir", default="runs", help="Directory to write checkpoints and CSVs into.")
     args = ap.parse_args()
@@ -380,6 +445,10 @@ def main():
         no_atom_nodes=args.no_atom_nodes,
         no_atom_edges=args.no_atom_edges,
         no_esm2=args.no_esm2,
+        no_pssm=args.no_pssm,
+        no_hhm=args.no_hhm,
+        no_msa_freq=args.no_msa_freq,
+        no_msa_cons=args.no_msa_cons,
     )
     prefix = make_prefix(args.job_id, ablations)
 
@@ -413,7 +482,7 @@ def main():
             f"train_mse={tr_mse:.4f} "
             f"test_rmse={metrics['rmse']:.4f} "
             f"test_mae={metrics['mae']:.4f} "
-            f"prefix={prefix}"
+            f"prefix={prefix}", flush=True
         )
 
         # Save "last" every epoch (useful for resuming)
@@ -449,9 +518,9 @@ def main():
             _best_metrics, best_rows = evaluate_and_collect(model, test_loader, device)
             write_csv(best_test_csv_path, best_rows)
 
-    print(f"saved best checkpoint to: {best_ckpt_path} (best_rmse={best_rmse:.4f})")
-    print(f"saved best test predictions to: {best_test_csv_path}")
-    print(f"saved last checkpoint to: {last_ckpt_path}")
+    print(f"saved best checkpoint to: {best_ckpt_path} (best_rmse={best_rmse:.4f})",flush=True)
+    print(f"saved best test predictions to: {best_test_csv_path}",flush=True)
+    print(f"saved last checkpoint to: {last_ckpt_path}",flush=True)
 
 
 if __name__ == "__main__":
