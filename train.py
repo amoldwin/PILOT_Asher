@@ -103,11 +103,50 @@ def _validate_index_list(index_arr: np.ndarray, n_atoms: int) -> bool:
         return False
 
     # Optional sanity: mostly non-decreasing (not strictly required but typical)
-    # If this fails it may still be usable, but it often indicates corruption.
     if np.any(starts[1:] < starts[:-1] - 5):
         return False
 
     return True
+
+
+def _safe_corrcoef(x: np.ndarray, y: np.ndarray) -> float:
+    """Pearson r; returns nan if undefined."""
+    if x.size < 2:
+        return float("nan")
+    if np.allclose(np.std(x), 0.0) or np.allclose(np.std(y), 0.0):
+        return float("nan")
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def _rankdata_average(a: np.ndarray) -> np.ndarray:
+    """
+    Minimal 'rankdata' with average ranks for ties (1..n), implemented without scipy.
+    """
+    a = np.asarray(a)
+    n = a.size
+    order = np.argsort(a, kind="mergesort")  # stable for ties
+    ranks = np.empty(n, dtype=float)
+
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and a[order[j + 1]] == a[order[i]]:
+            j += 1
+        # average rank for ties in [i, j]
+        avg = (i + j) / 2.0 + 1.0
+        ranks[order[i:j + 1]] = avg
+        i = j + 1
+
+    return ranks
+
+
+def _spearmanr(x: np.ndarray, y: np.ndarray) -> float:
+    """Spearman rho via Pearson on ranks; returns nan if undefined."""
+    if x.size < 2:
+        return float("nan")
+    rx = _rankdata_average(x)
+    ry = _rankdata_average(y)
+    return _safe_corrcoef(rx, ry)
 
 
 class PilotNPYDataset(Dataset):
@@ -198,7 +237,6 @@ class PilotNPYDataset(Dataset):
         index = np.load(base + f"I_{suffix}.npy").astype(int)
         extra = np.load(base + f"EF_{suffix}.npy").astype(float)
 
-        # Validate index BEFORE conversions; if invalid, signal via exception to skip upstream
         if not _validate_index_list(index, n_atoms=atom_x.shape[0]):
             raise ValueError(f"Bad atom->res index list for {mut_id} {suffix}: shape={index.shape} n_atoms={atom_x.shape[0]}")
 
@@ -207,7 +245,6 @@ class PilotNPYDataset(Dataset):
         res_e = Normalization(res_e)
         atom_e = Normalization(atom_e)
 
-        # sanitize (fix NaN/Inf) - important due to possible NaNs in HHM normalization etc.
         if self.sanitize:
             fixed = 0
             fixed += _nan_to_num_inplace(res_x)
@@ -274,7 +311,6 @@ class PilotNPYDataset(Dataset):
             wt = self._load_one(mut_id, "wt", abl)
             mt = self._load_one(mut_id, "mt", abl)
         except ValueError as e:
-            # bad index list or other structural inconsistency
             self.bad_index_count += 1
             warnings.warn(f"[PilotNPYDataset] {e}; skipping mut_id={mut_id}")
             return None
@@ -434,10 +470,16 @@ def evaluate_and_collect(model, loader, device):
     ys = np.array(ys, dtype=float)
     ps = np.array(ps, dtype=float)
     if used == 0:
-        metrics = {"mse": float("nan"), "rmse": float("nan"), "mae": float("nan")}
+        metrics = {"mse": float("nan"), "rmse": float("nan"), "mae": float("nan"), "pearson": float("nan"), "spearman": float("nan")}
     else:
         mse = float(np.mean((ps - ys) ** 2))
-        metrics = {"mse": mse, "rmse": float(np.sqrt(mse)), "mae": float(np.mean(np.abs(ps - ys)))}
+        metrics = {
+            "mse": mse,
+            "rmse": float(np.sqrt(mse)),
+            "mae": float(np.mean(np.abs(ps - ys))),
+            "pearson": _safe_corrcoef(ps, ys),
+            "spearman": _spearmanr(ps, ys),
+        }
 
     return metrics, rows, {"used": used, "skipped_missing": skipped_missing, "skipped_nan": skipped_nan}
 
@@ -458,6 +500,12 @@ def write_lines(path: str, lines: List[str]):
     with open(path, "w") as f:
         for ln in lines:
             f.write(str(ln) + "\n")
+
+
+def _fmt(x: float, nd: int = 4) -> str:
+    if x is None or not np.isfinite(x):
+        return "nan"
+    return f"{x:.{nd}f}"
 
 
 def main():
@@ -513,8 +561,25 @@ def main():
     set_global_seed(args.seed)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
+    print("=" * 88, flush=True)
+    print("PILOT training script", flush=True)
+    print(f"job_id        : {args.job_id}", flush=True)
+    print(f"prefix        : {prefix}", flush=True)
+    print(f"seed          : {args.seed}", flush=True)
+    print(f"device        : {device}", flush=True)
+    print(f"train file    : {args.train}", flush=True)
+    print(f"test file     : {args.test}", flush=True)
+    print(f"feature_dir   : {args.feature_dir}", flush=True)
+    print(f"out_dir       : {args.out_dir}", flush=True)
+    print(f"epochs        : {args.epochs}", flush=True)
+    print(f"lr            : {args.lr}", flush=True)
+    print(f"sanitize      : {args.sanitize}", flush=True)
+    print(f"ablations     : {ablation_tag(ablations)}", flush=True)
+    print("=" * 88, flush=True)
+
     missing_mut_ids: Set[str] = set()
 
+    print("[data] Loading datasets...", flush=True)
     train_ds = PilotNPYDataset(
         args.train, args.feature_dir,
         max_warn_missing=args.max_warn_missing,
@@ -529,34 +594,48 @@ def main():
         sanitize=args.sanitize,
         max_warn_sanitize=args.max_warn_sanitize,
     )
+    print(f"[data] Train rows: {len(train_ds)} | Test rows: {len(test_ds)}", flush=True)
 
+    print("[data] Building loaders (batch_size=1 enforced)...", flush=True)
     train_loader = make_loader(train_ds, ablations, shuffle=True, seed=args.seed)
     test_loader = make_loader(test_ds, ablations, shuffle=False, seed=args.seed)
 
+    print("[model] Initializing model...", flush=True)
     model = ANTIGEN_18().to(device)
+    n_params = sum(p.numel() for p in model.parameters())
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"[model] params: total={n_params:,} trainable={n_trainable:,}", flush=True)
+
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    print("[train] Starting training loop...", flush=True)
 
     best_rmse = float("inf")
     best_ckpt_path = os.path.join(args.out_dir, f"{prefix}__best.pt")
     last_ckpt_path = os.path.join(args.out_dir, f"{prefix}__last.pt")
     best_test_csv_path = os.path.join(args.out_dir, f"{prefix}__test_predictions.csv")
 
+    header = (
+        f"{'epoch':>5} | {'train_mse':>10} | "
+        f"{'test_rmse':>9} {'test_mae':>9} {'pearson':>9} {'spearman':>9} | "
+        f"{'train used/miss/nan':>18} | {'test used/miss/nan':>17} | {'best_rmse':>9}"
+    )
+    print("-" * len(header), flush=True)
+    print(header, flush=True)
+    print("-" * len(header), flush=True)
+
     for epoch in range(1, args.epochs + 1):
         tr_mse, tr_counts = train_one_epoch(model, train_loader, optim, device)
         te_metrics, te_rows, te_counts = evaluate_and_collect(model, test_loader, device)
 
-        print(
-            f"epoch={epoch:03d} "
-            f"train_mse={tr_mse:.4f} "
-            f"test_rmse={te_metrics['rmse']:.4f} "
-            f"test_mae={te_metrics['mae']:.4f} "
-            f"train(used={tr_counts['used']}, missing={tr_counts['skipped_missing']}, nan={tr_counts['skipped_nan']}) "
-            f"test(used={te_counts['used']}, missing={te_counts['skipped_missing']}, nan={te_counts['skipped_nan']}) "
-            f"sanitized_values(train_ds={train_ds.sanitized_values}, test_ds={test_ds.sanitized_values}) "
-            f"bad_index(train_ds={train_ds.bad_index_count}, test_ds={test_ds.bad_index_count}) "
-            f"prefix={prefix}",
-            flush=True
+        line = (
+            f"{epoch:5d} | {_fmt(tr_mse):>10} | "
+            f"{_fmt(te_metrics['rmse']):>9} {_fmt(te_metrics['mae']):>9} "
+            f"{_fmt(te_metrics['pearson']):>9} {_fmt(te_metrics['spearman']):>9} | "
+            f"{tr_counts['used']:5d}/{tr_counts['skipped_missing']:4d}/{tr_counts['skipped_nan']:3d} | "
+            f"{te_counts['used']:5d}/{te_counts['skipped_missing']:4d}/{te_counts['skipped_nan']:3d} | "
+            f"{_fmt(best_rmse):>9}"
         )
+        print(line, flush=True)
 
         torch.save(
             {
@@ -589,14 +668,19 @@ def main():
             )
             write_csv(best_test_csv_path, te_rows)
 
+    print("-" * len(header), flush=True)
+    print("[done] Training complete.", flush=True)
+    print(f"[done] saved best checkpoint to: {best_ckpt_path} (best_rmse={best_rmse:.4f})", flush=True)
+    print(f"[done] saved best test predictions to: {best_test_csv_path}", flush=True)
+    print(f"[done] saved last checkpoint to: {last_ckpt_path}", flush=True)
+    print(f"[done] dataset missing counts: train={train_ds.missing_count} test={test_ds.missing_count}", flush=True)
+    print(f"[done] sanitized_values: train_ds={train_ds.sanitized_values} test_ds={test_ds.sanitized_values}", flush=True)
+    print(f"[done] bad_index: train_ds={train_ds.bad_index_count} test_ds={test_ds.bad_index_count}", flush=True)
+    print(f"[done] missing mut_id count (union): {len(missing_mut_ids)}", flush=True)
+
     if args.write_missing is not None:
         write_lines(args.write_missing, sorted(missing_mut_ids))
-
-    print(f"saved best checkpoint to: {best_ckpt_path} (best_rmse={best_rmse:.4f})", flush=True)
-    print(f"saved best test predictions to: {best_test_csv_path}", flush=True)
-    print(f"saved last checkpoint to: {last_ckpt_path}", flush=True)
-    print(f"dataset missing counts: train={train_ds.missing_count} test={test_ds.missing_count}", flush=True)
-    print(f"missing mut_id count (union): {len(missing_mut_ids)}", flush=True)
+        print(f"[done] wrote missing mut_ids to: {args.write_missing}", flush=True)
 
 
 if __name__ == "__main__":
