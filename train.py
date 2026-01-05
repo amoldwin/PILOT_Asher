@@ -12,9 +12,6 @@ from torch.utils.data import Dataset, DataLoader
 from model_0830 import ANTIGEN_18
 
 
-# -------------------------
-# Preprocessing (match predict.py)
-# -------------------------
 def Normalization(x, scop=1, start=0):
     return scop * (x - np.min(x, axis=0)) / (np.max(x, axis=0) - np.min(x, axis=0) + 1e-8) + start
 
@@ -23,42 +20,27 @@ def Standardization(x):
     return (x - np.mean(x, axis=0)) / (np.std(x, axis=0) + 1e-8)
 
 
-# -------------------------
-# Reproducibility helpers
-# -------------------------
 def set_global_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
 
-# -------------------------
-# Mutation parsing
-# -------------------------
 def mut_id_from_row(pdb: str, chain: str, mut_pos: str, residue_field: str):
     wt = residue_field[0]
     mt = residue_field[-1]
     return f"{pdb}_{chain}_{wt}{mut_pos}{mt}", wt, mt
 
 
-# -------------------------
-# RN feature layout (from feature_generators/feature_alignment.py)
-# RN is 105 dims:
-#   aa_code(20) + ss(3) + depth(1) + properties(7) + sasa(1) + pssm(20) + hhm(30) + msa_freq(21) + cons_score(1) + is_mut(1)
-# -------------------------
 RN_PSSM = slice(32, 52)
 RN_HHM = slice(52, 82)
 RN_MSA_FREQ = slice(82, 103)
 RN_MSA_CONS = slice(103, 104)
 
 
-# -------------------------
-# Ablations
-# -------------------------
 @dataclass(frozen=True)
 class Ablations:
     no_residue_nodes: bool = False
@@ -91,9 +73,43 @@ def make_prefix(job_id: str, abl: Ablations) -> str:
     return f"{job_id}__{ablation_tag(abl)}"
 
 
-# -------------------------
-# Dataset
-# -------------------------
+def _nan_to_num_inplace(x: np.ndarray) -> int:
+    """Replace NaN/Inf with finite values. Returns count of non-finite entries fixed."""
+    nonfinite = ~np.isfinite(x)
+    n_bad = int(nonfinite.sum())
+    if n_bad:
+        np.nan_to_num(x, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    return n_bad
+
+
+def _validate_index_list(index_arr: np.ndarray, n_atoms: int) -> bool:
+    """
+    index_arr is expected to be shape (n_res, 2) with inclusive [start, end] per residue.
+    Checks bounds and non-empty slices.
+    """
+    if index_arr.ndim != 2 or index_arr.shape[1] != 2:
+        return False
+    if index_arr.shape[0] == 0:
+        return False
+
+    starts = index_arr[:, 0].astype(int)
+    ends = index_arr[:, 1].astype(int)
+
+    if np.any(starts < 0) or np.any(ends < 0):
+        return False
+    if np.any(starts > ends):
+        return False
+    if np.any(ends >= n_atoms):
+        return False
+
+    # Optional sanity: mostly non-decreasing (not strictly required but typical)
+    # If this fails it may still be usable, but it often indicates corruption.
+    if np.any(starts[1:] < starts[:-1] - 5):
+        return False
+
+    return True
+
+
 class PilotNPYDataset(Dataset):
     def __init__(
         self,
@@ -103,12 +119,23 @@ class PilotNPYDataset(Dataset):
         warn_missing: bool = True,
         max_warn_missing: int = 20,
         missing_mut_ids: Optional[Set[str]] = None,
+        sanitize: bool = True,
+        warn_sanitize: bool = True,
+        max_warn_sanitize: int = 20,
     ):
         self.split_tsv = split_tsv
         self.input_dir = os.path.join(feature_dir, input_subdir)
+
         self.warn_missing = warn_missing
         self.max_warn_missing = max_warn_missing
         self._warned_missing = 0
+
+        self.sanitize = sanitize
+        self.warn_sanitize = warn_sanitize
+        self.max_warn_sanitize = max_warn_sanitize
+        self._warned_sanitize = 0
+        self.sanitized_values = 0
+        self.bad_index_count = 0
 
         self.rows: List[Tuple[str, str, str, str, float]] = []
         with open(split_tsv, "r") as f:
@@ -125,7 +152,7 @@ class PilotNPYDataset(Dataset):
                 self.rows.append((pdb, chain, mut_pos, residue, exp_ddg))
 
         self.missing_count = 0
-        self.missing_mut_ids = missing_mut_ids  # external shared set if provided
+        self.missing_mut_ids = missing_mut_ids
 
     def __len__(self):
         return len(self.rows)
@@ -171,10 +198,29 @@ class PilotNPYDataset(Dataset):
         index = np.load(base + f"I_{suffix}.npy").astype(int)
         extra = np.load(base + f"EF_{suffix}.npy").astype(float)
 
+        # Validate index BEFORE conversions; if invalid, signal via exception to skip upstream
+        if not _validate_index_list(index, n_atoms=atom_x.shape[0]):
+            raise ValueError(f"Bad atom->res index list for {mut_id} {suffix}: shape={index.shape} n_atoms={atom_x.shape[0]}")
+
         # preprocessing identical to predict.py
         res_x[:, :-1] = Standardization(res_x[:, :-1])
         res_e = Normalization(res_e)
         atom_e = Normalization(atom_e)
+
+        # sanitize (fix NaN/Inf) - important due to possible NaNs in HHM normalization etc.
+        if self.sanitize:
+            fixed = 0
+            fixed += _nan_to_num_inplace(res_x)
+            fixed += _nan_to_num_inplace(res_e)
+            fixed += _nan_to_num_inplace(atom_x)
+            fixed += _nan_to_num_inplace(atom_e)
+            fixed += _nan_to_num_inplace(extra)
+            self.sanitized_values += fixed
+            if fixed and self.warn_sanitize and self._warned_sanitize < self.max_warn_sanitize:
+                self._warned_sanitize += 1
+                warnings.warn(f"[PilotNPYDataset] Sanitized {fixed} non-finite values for mut_id={mut_id} ({suffix}).")
+                if self._warned_sanitize == self.max_warn_sanitize:
+                    warnings.warn("[PilotNPYDataset] Reached max_warn_sanitize; suppressing further sanitize warnings.")
 
         # ablations
         res_x = self._apply_rn_ablations(res_x, abl)
@@ -187,7 +233,6 @@ class PilotNPYDataset(Dataset):
         if abl.no_esm2:
             extra[:] = 0.0
 
-        # to torch
         return (
             torch.tensor(res_x, dtype=torch.float32),
             torch.tensor(res_ei, dtype=torch.int64),
@@ -214,7 +259,6 @@ class PilotNPYDataset(Dataset):
             self.missing_count += 1
             if self.missing_mut_ids is not None:
                 self.missing_mut_ids.add(mut_id)
-
             if self.warn_missing and self._warned_missing < self.max_warn_missing:
                 self._warned_missing += 1
                 warnings.warn(
@@ -226,12 +270,17 @@ class PilotNPYDataset(Dataset):
                     warnings.warn("[PilotNPYDataset] Reached max_warn_missing; suppressing further missing-file warnings.")
             return None
 
-        wt = self._load_one(mut_id, "wt", abl)
-        mt = self._load_one(mut_id, "mt", abl)
+        try:
+            wt = self._load_one(mut_id, "wt", abl)
+            mt = self._load_one(mut_id, "mt", abl)
+        except ValueError as e:
+            # bad index list or other structural inconsistency
+            self.bad_index_count += 1
+            warnings.warn(f"[PilotNPYDataset] {e}; skipping mut_id={mut_id}")
+            return None
 
         y = torch.tensor([[y]], dtype=torch.float32)
         rand = torch.tensor([[0.0]], dtype=torch.float32)
-
         meta = {"pdb": pdb, "chain": chain, "mut_pos": mut_pos, "residue": residue, "mut_id": mut_id}
         return (*wt, *mt, rand, y, meta)
 
@@ -263,9 +312,6 @@ def _tensor_is_finite(x: torch.Tensor) -> bool:
     return bool(torch.isfinite(x).all().item())
 
 
-# -------------------------
-# Train / Eval
-# -------------------------
 def train_one_epoch(model, loader, optim, device):
     model.train()
     loss_fn = torch.nn.MSELoss()
@@ -284,7 +330,6 @@ def train_one_epoch(model, loader, optim, device):
          res_x_mt, res_ei_mt, res_e_mt, atom_x_mt, atom_ei_mt, atom_e_mt, extra_mt, index_mt,
          rand, y, meta) = sample
 
-        # move to device
         res_x_wt = res_x_wt.to(device); res_ei_wt = res_ei_wt.to(device); res_e_wt = res_e_wt.to(device)
         atom_x_wt = atom_x_wt.to(device); atom_ei_wt = atom_ei_wt.to(device); atom_e_wt = atom_e_wt.to(device)
         extra_wt = extra_wt.to(device); index_wt = index_wt.to(device)
@@ -301,7 +346,6 @@ def train_one_epoch(model, loader, optim, device):
             rand
         )
 
-        # Skip NaN/Inf predictions early
         if not _tensor_is_finite(pred):
             skipped_nan += 1
             if skipped_nan <= 5:
@@ -317,10 +361,7 @@ def train_one_epoch(model, loader, optim, device):
 
         optim.zero_grad(set_to_none=True)
         loss.backward()
-
-        # Optional: clip to avoid blowups
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-
         optim.step()
 
         total_loss += float(loss.item())
@@ -419,9 +460,6 @@ def write_lines(path: str, lines: List[str]):
             f.write(str(ln) + "\n")
 
 
-# -------------------------
-# Main
-# -------------------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--train", required=True)
@@ -435,8 +473,13 @@ def main():
     ap.add_argument("--job-id", type=str, required=True)
 
     ap.add_argument("--out-dir", default="runs")
-    ap.add_argument("--write-missing", default=None, help="If set, write missing mut_ids (train+test) to this file.")
-    ap.add_argument("--max-warn-missing", type=int, default=20, help="Cap missing-file warnings per dataset.")
+    ap.add_argument("--write-missing", default=None)
+    ap.add_argument("--max-warn-missing", type=int, default=20)
+
+    # sanitation toggles
+    ap.add_argument("--sanitize", action="store_true", default=True, help="Replace NaN/Inf in loaded arrays with 0 (default on).")
+    ap.add_argument("--no-sanitize", dest="sanitize", action="store_false")
+    ap.add_argument("--max-warn-sanitize", type=int, default=20)
 
     # coarse modality ablations
     ap.add_argument("--no_residue_nodes", action="store_true")
@@ -472,8 +515,20 @@ def main():
 
     missing_mut_ids: Set[str] = set()
 
-    train_ds = PilotNPYDataset(args.train, args.feature_dir, max_warn_missing=args.max_warn_missing, missing_mut_ids=missing_mut_ids)
-    test_ds = PilotNPYDataset(args.test, args.feature_dir, max_warn_missing=args.max_warn_missing, missing_mut_ids=missing_mut_ids)
+    train_ds = PilotNPYDataset(
+        args.train, args.feature_dir,
+        max_warn_missing=args.max_warn_missing,
+        missing_mut_ids=missing_mut_ids,
+        sanitize=args.sanitize,
+        max_warn_sanitize=args.max_warn_sanitize,
+    )
+    test_ds = PilotNPYDataset(
+        args.test, args.feature_dir,
+        max_warn_missing=args.max_warn_missing,
+        missing_mut_ids=missing_mut_ids,
+        sanitize=args.sanitize,
+        max_warn_sanitize=args.max_warn_sanitize,
+    )
 
     train_loader = make_loader(train_ds, ablations, shuffle=True, seed=args.seed)
     test_loader = make_loader(test_ds, ablations, shuffle=False, seed=args.seed)
@@ -497,6 +552,8 @@ def main():
             f"test_mae={te_metrics['mae']:.4f} "
             f"train(used={tr_counts['used']}, missing={tr_counts['skipped_missing']}, nan={tr_counts['skipped_nan']}) "
             f"test(used={te_counts['used']}, missing={te_counts['skipped_missing']}, nan={te_counts['skipped_nan']}) "
+            f"sanitized_values(train_ds={train_ds.sanitized_values}, test_ds={test_ds.sanitized_values}) "
+            f"bad_index(train_ds={train_ds.bad_index_count}, test_ds={test_ds.bad_index_count}) "
             f"prefix={prefix}",
             flush=True
         )
