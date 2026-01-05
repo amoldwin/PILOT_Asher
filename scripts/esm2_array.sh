@@ -8,8 +8,9 @@
 #SBATCH --partition=contrib-gpuq
 #SBATCH --qos=gpu
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:A100.80gb:1
-#SBATCH --mem=32G
+#SBATCH --gres=gpu:3g.40gb:1
+##gpu:A100.80gb:1
+#SBATCH --mem=16G
 #SBATCH --time=01-00:30:00
 # Do NOT set --array here; pass via sbatch --array=0-9
 
@@ -18,6 +19,8 @@ set -euo pipefail
 MUT_LIST=${1:?Usage: sbatch --array=0-9 scripts/esm2_array.sh MUT_LIST FEATURE_DIR}
 FEATURE_DIR=${2:?Usage: sbatch --array=0-9 scripts/esm2_array.sh MUT_LIST FEATURE_DIR}
 
+
+##sbatch --array=0-9 scripts/esm2_array.sh dataset/mutation_list_test.txt /scratch/amoldwin/datasets/PILOT
 # Robust conda activation (batch-safe)
 source ~/PROJECTS/miniconda/etc/profile.d/conda.sh
 conda activate pilot

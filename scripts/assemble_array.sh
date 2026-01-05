@@ -17,8 +17,9 @@
 MUT_LIST=$1
 FEATURE_DIR=$2
 
-source ../miniconda/bin/activate
+source /projects/ashehu/amoldwin/miniconda/etc/profile.d/conda.sh
 conda activate pilot
+
 export HHBLITS_DB=/scratch/amoldwin/datasets/Uniref30
 
 LINE=$(awk -v idx="${SLURM_ARRAY_TASK_ID}" 'NR==idx+1{print;exit}' "${MUT_LIST}")

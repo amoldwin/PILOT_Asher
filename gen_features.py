@@ -34,6 +34,14 @@ uniRef30_path = os.environ.get('HHBLITS_DB', './software/database/uniref30/UniRe
 naccess_path = './software/naccess2.1.1/naccess'
 
 
+def _nonempty(p: str) -> bool:
+    """True iff path exists and has size > 0."""
+    try:
+        return os.path.exists(p) and os.path.getsize(p) > 0
+    except OSError:
+        return False
+
+
 def get_new_pdb_array(pdb_array, res_pdbpos, atom_indexpos):
     new_pdb_array = []
     res_index_pos_dict, atom_index_pos = {}, {}
@@ -137,9 +145,10 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
                 else:
                     mut_frsa = os.path.join(sasa_dir, f'{mut_id}.rsa')
                     mut_fasa = os.path.join(sasa_dir, f'{mut_id}.asa')
-                    if not os.path.exists(mut_frsa):
+                    # FIX: overwrite missing OR empty
+                    if not _nonempty(mut_frsa):
                         shutil.copyfile(wild_frsa, mut_frsa)
-                    if not os.path.exists(mut_fasa):
+                    if not _nonempty(mut_fasa):
                         shutil.copyfile(wild_fasa, mut_fasa)
             else:
                 print('Using Naccess ...')
@@ -149,9 +158,10 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
                 else:
                     mut_frsa = os.path.join(sasa_dir, f'{mut_id}.rsa')
                     mut_fasa = os.path.join(sasa_dir, f'{mut_id}.asa')
-                    if not os.path.exists(mut_frsa):
+                    # FIX: overwrite missing OR empty
+                    if not _nonempty(mut_frsa):
                         shutil.copyfile(wild_frsa, mut_frsa)
-                    if not os.path.exists(mut_fasa):
+                    if not _nonempty(mut_fasa):
                         shutil.copyfile(wild_fasa, mut_fasa)
 
         # PSI-BLAST + PSSM + rawmsa
@@ -193,7 +203,7 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
     mut_asa = os.path.join(sasa_dir, f'{mut_id}.asa')
 
     def _ensure_sasa(pdb_file, rsa_path, asa_path):
-        if not (os.path.exists(rsa_path) and os.path.exists(asa_path)):
+        if not (_nonempty(rsa_path) and _nonempty(asa_path)):
             if sasa_backend.lower() == 'freesasa':
                 use_freesasa(pdb_file, sasa_dir, freesasa_path)
             else:
@@ -203,9 +213,10 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
     if mutated_by_structure:
         _ensure_sasa(mut_pdb, mut_rsa, mut_asa)
     else:
-        if not os.path.exists(mut_rsa):
+        # FIX: overwrite missing OR empty
+        if not _nonempty(mut_rsa):
             shutil.copyfile(wild_rsa, mut_rsa)
-        if not os.path.exists(mut_asa):
+        if not _nonempty(mut_asa):
             shutil.copyfile(wild_asa, mut_asa)
 
     wild_rsasa, wild_asasa = calc_SASA(wild_rsa, wild_asa)

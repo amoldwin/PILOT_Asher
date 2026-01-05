@@ -9,7 +9,7 @@
 #SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=2
-#SBATCH --mem=8G
+#SBATCH --mem=16G
 #SBATCH --time=02-00:00:00
 
 # Submit with sbatch --array=0-$((N-1))%THROTTLE ...

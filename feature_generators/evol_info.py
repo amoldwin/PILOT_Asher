@@ -143,7 +143,7 @@ def format_rawmsa_via_blastdbcmd(
     formatted_output_file: str,
     blastdbcmd_path: str,
     uniref90_path: str,
-    max_hits: int = 500,
+    max_hits: int = 100,
 ) -> int:
     """
     Convert PSI-BLAST pairwise output to a FASTA containing hit sequences fetched from the BLAST DB.
