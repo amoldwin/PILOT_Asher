@@ -487,7 +487,9 @@ def process_hhm(path):
                 feature[axis_x][axis_y] = (9999 if j == "*" else float(j)) / 10000.0
                 axis_y += 1
             axis_x += 1
-        feature = (feature - np.min(feature)) / (np.max(feature) - np.min(feature))
+        # feature = (feature - np.min(feature)) / (np.max(feature) - np.min(feature))
+        den = (np.max(feature) - np.min(feature))
+        feature = (feature - np.min(feature)) / (den + 1e-8)
         return feature
 
 
