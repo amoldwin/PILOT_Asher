@@ -111,7 +111,17 @@ def get_nearest_resindex(pdb_file, chain_id, mut_pos, aa_num=16):
     atompos2index = {}
     new_pdb_array = []
     pdb_array = get_pdb_array(pdb_file, chain_id)
+
+    # ---- NEW: handle empty chain early ----
+    if pdb_array.ndim != 2 or pdb_array.shape[0] == 0:
+        return [], {}, np.array([], dtype='str')
+
     residue_index, pdb_pos_list = get_residue_info(pdb_array)
+
+    # ---- NEW: if mut_pos not in list, fail cleanly ----
+    if mut_pos not in pdb_pos_list:
+        return [], {}, np.array([], dtype='str')
+
     residue_dm = get_residue_distance_matrix(pdb_array, residue_index, 'c_alpha')
     index = residue_dm.argsort()[pdb_pos_list.index(mut_pos), :aa_num]
 
@@ -121,6 +131,16 @@ def get_nearest_resindex(pdb_file, chain_id, mut_pos, aa_num=16):
     index = 0
     for atom_info in pdb_array:
         if atom_info[2][0] == 'C' or atom_info[2][0] == 'N' or atom_info[2][0] == 'O' or atom_info[2][0] == 'S':
+            if atom_info[6] in selectes_pdb_pos:
+                atompos2index[atom_info[1]] = index
+                new_pdb_array.append(list(atom_info))
+                index += 1
+
+    # ---- NEW: fallback if element filtering removed everything ----
+    if len(new_pdb_array) == 0:
+        atompos2index = {}
+        index = 0
+        for atom_info in pdb_array:
             if atom_info[6] in selectes_pdb_pos:
                 atompos2index[atom_info[1]] = index
                 new_pdb_array.append(list(atom_info))

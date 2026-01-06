@@ -39,6 +39,9 @@ class get_edge(object):
         return plmdca_dict, mfdca_dict
 
     def get_residue_info(self, pdb_array):
+        if not isinstance(pdb_array, np.ndarray) or pdb_array.ndim != 2 or pdb_array.shape[0] == 0:
+            raise ValueError(f"get_residue_info: pdb_array is empty or not 2D (shape={getattr(pdb_array,'shape',None)})")
+
         atom_res_array = pdb_array[:, 6]  # 每一个原子对应的氨基酸编号
         # print(atom_res_array)
         boundary_list = []  # 列表中代表每一个氨基酸的起始原子和终止原子的位置
@@ -67,6 +70,7 @@ class get_edge(object):
         return coord_array, atom_dm
 
     def get_residue_distance_matrix(self, pdb_array, residue_index, distance_type):
+        
         if distance_type == 'c_alpha':
             coord_array = np.empty((residue_index.shape[0], 3))
             for i in range(residue_index.shape[0]):
@@ -226,6 +230,14 @@ class get_edge(object):
 
 
     def generate_res_edge_feature_postmut(self, mut_pos, pdb_array, num_neighbors=16, distance_type='c_alpha'):
+        if not isinstance(pdb_array, np.ndarray) or pdb_array.ndim != 2 or pdb_array.shape[0] == 0:
+            raise ValueError(f"generate_res_edge_feature_postmut: empty/invalid pdb_array for mut_pos={mut_pos}")
+
+        residue_index, pdb_pos_list = get_edge().get_residue_info(pdb_array)
+
+        if mut_pos not in pdb_pos_list:
+            raise ValueError(f"generate_res_edge_feature_postmut: mut_pos={mut_pos} not present in pdb_pos_list={pdb_pos_list[:10]}...")
+
         residue_index, pdb_pos_list = get_edge().get_residue_info(pdb_array)
         residue_dm = get_edge().get_residue_distance_matrix(pdb_array, residue_index, distance_type)
         neighbor_index = get_edge().get_neighbor_index(residue_dm, num_neighbors)

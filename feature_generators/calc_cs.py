@@ -29,18 +29,33 @@ class calculate_conservation_score(object):
             sequence = ''.join([c if c in iupac_alphabet else '-' for c in sequence])
             alignment.append(list(sequence.replace('U', '-')))
 
+        # ---- NEW: normalize lengths to prevent IndexError ----
+        if not alignment:
+            return alignment
+        min_len = min(len(seq) for seq in alignment)
+        # truncate to min length (safe, keeps columns aligned)
+        alignment = [seq[:min_len] for seq in alignment]
         return alignment
 
-
     def calculate_sequence_weights(self, alignment):
-        seq_weights = np.zeros(len(alignment), dtype=float)   # 序列数量
+        seq_weights = np.zeros(len(alignment), dtype=float)
+        if len(alignment) == 0:
+            return seq_weights
+        if len(alignment[0]) == 0:
+            return seq_weights
+
         for i in range(len(alignment[0])):  # all positions
-            freq_counts = np.zeros(21, dtype=float)    # 在i个位置上各个氨基酸出现的频数
+            freq_counts = np.zeros(21, dtype=float)
             for j in range(len(alignment)):  # all sequences
-                if alignment[j][i] != '-':  # ignore gaps
+                # ---- NEW: guard ragged just in case ----
+                if i >= len(alignment[j]):
+                    continue
+                if alignment[j][i] != '-':
                     freq_counts[aadict[alignment[j][i]]] += 1
-            num_observed_types = np.nonzero(freq_counts)[0].shape[0]   # 在i位置上存在过的氨基酸的类别数
-            for j in range(len(alignment)):  # all sequences
+            num_observed_types = np.nonzero(freq_counts)[0].shape[0]
+            for j in range(len(alignment)):
+                if i >= len(alignment[j]):
+                    continue
                 d = freq_counts[aadict[alignment[j][i]]] * num_observed_types
                 if d > 0:
                     seq_weights[j] += 1 / d
