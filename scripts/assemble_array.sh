@@ -13,7 +13,7 @@
 #SBATCH --time=01-04:00:00
 #SBATCH --array=0-15
 
-# Usage: sbatch slurm_assemble_array.sh ./mutation_list.txt /features
+# Usage: sbatch slurm_assemble_array.sh dataset./mutation_list_filtered.txt /features
 MUT_LIST=$1
 FEATURE_DIR=$2
 
@@ -21,6 +21,9 @@ source /projects/ashehu/amoldwin/miniconda/etc/profile.d/conda.sh
 conda activate pilot
 
 export HHBLITS_DB=/scratch/amoldwin/datasets/Uniref30
+export PATH="/projects/ashehu/amoldwin/software/msms/bin:$PATH"
+
+
 
 LINE=$(awk -v idx="${SLURM_ARRAY_TASK_ID}" 'NR==idx+1{print;exit}' "${MUT_LIST}")
 echo "Assemble: ${LINE}"

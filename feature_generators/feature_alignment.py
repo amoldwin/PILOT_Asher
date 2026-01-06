@@ -1,4 +1,3 @@
-
 aa2property = {'A':[1.28, 0.05, 1.00, 0.31, 6.11, 0.42, 0.23],
                'G':[0.00, 0.00, 0.00, 0.00, 6.07, 0.13, 0.15],
                'V':[3.67, 0.14, 3.00, 1.22, 6.02, 0.27, 0.49],
@@ -29,66 +28,99 @@ def aa2code():
     for i in range(20):
         code = []
         for j in range(20):
-            if i == j:
-                code.append(1)
-            else:
-                code.append(0)
+            code.append(1 if i == j else 0)
         aa2code[aa_name[i]] = code
     return aa2code
 
 
-def feature_alignment(selected_res, selected_atom, feature_data, res_dict, atom_dict, pdb2uniprot_posdict,
-                      mut_pos):
-
-
+def feature_alignment(selected_res, selected_atom, feature_data, res_dict, atom_dict, pdb2uniprot_posdict, mut_pos):
     res_feature_dict, atom_feature_dict = {}, {}
 
     sasa_res = feature_data['sasa_res']
     sasa_atom = feature_data['sasa_atom']
-    ss_dict = feature_data['ss_dict']
-    depth_dict = feature_data['depth_dict']
+    ss_dict = feature_data['ss_dict'] or {}
+    depth_dict = feature_data['depth_dict'] or {}
     pssm_dict = feature_data['pssm_dict']
-    # res_dict = feature_data['res_dict']
     hhm_score = feature_data['hhm_score']
     conservation_dict = feature_data['conservation_dict']
     conservation_score = feature_data['conservation_score']
 
     aa2code_dict = aa2code()
 
-    ############################### res features ###############################
+    # Default fillers (shape-critical)
+    default_ss = [0, 0, 0]
+    default_depth = [0.0]
+    default_sasa = [0.0]
+    default_pssm = [0.0] * 20
+    default_hhm = [0.0] * 30
+    default_cs1 = [0.0] * 21
+    default_cs2 = 0.0
+
+    # ---------------- res features ----------------
     for pos in selected_res:
-        try:
-            res_name = res_dict[pos]
+        # If we don't even know the residue identity, we can't build the 20-AA onehot/properties reliably.
+        res_name = res_dict.get(pos)
+        if res_name is None:
+            continue
+        if res_name not in aa2code_dict or res_name not in aa2property:
+            continue
 
-            aa_code = aa2code_dict[res_name]
-            ss = ss_dict[pos]
-            depth = [depth_dict[pos]]
-            properties = aa2property[res_name]
-            sasa = [sasa_res[pos]]
+        aa_code = aa2code_dict[res_name]
+        properties = aa2property[res_name]
 
-            uniprot_pos = str(pdb2uniprot_posdict[pos])
-            pssm = pssm_dict[uniprot_pos]
-            hhm = hhm_score[int(uniprot_pos) - 1]
-            cs1 = conservation_dict[int(uniprot_pos)]
-            cs2 = conservation_score[int(uniprot_pos) - 1]
+        ss = ss_dict.get(pos, default_ss)
+        depth = [float(depth_dict.get(pos, 0.0))]
+        sasa = [float(sasa_res.get(pos, 0.0))]
 
-            if pos == mut_pos:
-                is_mut = [1]
+        # Uniprot pos mapping; if missing, we can't index pssm/hhm/cs reliably.
+        up = pdb2uniprot_posdict.get(pos)
+        if up is None:
+            pssm = default_pssm
+            hhm = default_hhm
+            cs1 = default_cs1
+            cs2 = default_cs2
+        else:
+            uniprot_pos = str(up)
+            pssm = pssm_dict.get(uniprot_pos, default_pssm)
+
+            # hhm_score indexed by (pos-1)
+            i = int(up) - 1
+            if 0 <= i < len(hhm_score):
+                hhm = list(hhm_score[i])
             else:
-                is_mut = [0]
-        except:
-            continue
+                hhm = default_hhm
 
-        res_feature_dict[pos] = aa_code + ss + depth + properties + sasa + pssm + list(hhm) + list(cs1) + [
-            cs2] +  is_mut
+            cs1 = list(conservation_dict.get(int(up), default_cs1))
 
-    ############################### atom features ###############################
+            if 0 <= i < len(conservation_score):
+                cs2 = float(conservation_score[i])
+            else:
+                cs2 = default_cs2
+
+        is_mut = [1] if pos == mut_pos else [0]
+
+        res_feature_dict[pos] = aa_code + ss + depth + properties + sasa + list(pssm) + list(hhm) + list(cs1) + [cs2] + is_mut
+
+    # Ensure mutation residue is present if possible
+    if mut_pos in selected_res and mut_pos not in res_feature_dict and mut_pos in res_dict:
+        # try again but with reduced requirements: allow unknown ss/depth/sasa and no evo
+        res_name = res_dict.get(mut_pos)
+        if res_name in aa2code_dict and res_name in aa2property:
+            aa_code = aa2code_dict[res_name]
+            properties = aa2property[res_name]
+            res_feature_dict[mut_pos] = aa_code + default_ss + default_depth + properties + default_sasa + default_pssm + default_hhm + default_cs1 + [default_cs2] + [1]
+
+    # ---------------- atom features ----------------
     for atom_index in selected_atom.keys():
-        try:
-            atom_type = atom2code_dist[atom_dict[atom_index][0]]
-            sasa = [sasa_atom[atom_index]]
-        except:
+        at = atom_dict.get(atom_index)
+        if at is None:
             continue
-        atom_feature_dict[atom_index] = atom_type + sasa
+        if len(at) == 0:
+            continue
+        elem = at[0]
+        if elem not in atom2code_dist:
+            continue
+        sasa = [float(sasa_atom.get(atom_index, 0.0))]
+        atom_feature_dict[atom_index] = atom2code_dist[elem] + sasa
 
     return res_feature_dict, atom_feature_dict

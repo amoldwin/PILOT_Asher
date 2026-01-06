@@ -15,12 +15,12 @@ def calc_ss(pdb_file, dssp_path):
     try:
         dssp_tuple = dssp_dict_from_pdb_file(pdb_file, DSSP=dssp_path)
     except Exception:
-        return False
+        # IMPORTANT: never return False; return empty dict so alignment can default-fill.
+        return {}
     dssp_dict = dssp_tuple[0]
     ss_dict = {}
     for (key, value) in dssp_dict.items():
         index = (str(key[1][1]) + str(key[1][2])).strip()
         ss = ss8to3(value[1])
         ss_dict[index] = ss
-    # print(ss_dict)
     return ss_dict
