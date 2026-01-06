@@ -142,6 +142,55 @@ def _spearmanr(x: np.ndarray, y: np.ndarray) -> float:
     return _safe_corrcoef(_rankdata_average(x), _rankdata_average(y))
 
 
+def _fallback_mut_index(mut_id: str, mode: str) -> int:
+    if mode == "center":
+        return 8
+    if mode == "hash":
+        # stable across processes/runs
+        return (abs(hash(mut_id)) % 16)
+    raise ValueError(f"Unknown --fallback-mutation-index mode: {mode}")
+
+
+def make_fallback_inputs(mut_id: str, suffix: str, mut_index: int):
+    """
+    Return placeholder arrays with correct shapes for the model.
+
+    Shapes:
+      RN:  (16,105)  last col is is_mut flag
+      RE:  (16,2)
+      REI: (2,16)
+      AN:  (1,5)
+      AE:  (1,3)
+      AEI: (2,1)
+      I:   (16,2)  all map to atom 0
+      EF:  (16,1280)
+    """
+    rn = np.zeros((16, 105), dtype=np.float64)
+    rn[:, -1] = 0.0
+    rn[mut_index, -1] = 1.0  # crucial so model can find mutpos
+
+    re = np.zeros((16, 2), dtype=np.float64)
+
+    rei = np.zeros((2, 16), dtype=np.int64)
+    rei[0, :] = mut_index
+    rei[1, :] = np.arange(16, dtype=np.int64)
+
+    an = np.zeros((1, 5), dtype=np.float64)
+
+    ae = np.zeros((1, 3), dtype=np.float64)
+    aei = np.zeros((2, 1), dtype=np.int64)
+    aei[0, 0] = 0
+    aei[1, 0] = 0
+
+    index = np.zeros((16, 2), dtype=np.int64)  # every residue pools from atom 0 only
+    index[:, 0] = 0
+    index[:, 1] = 0
+
+    ef = np.zeros((16, 1280), dtype=np.float64)
+
+    return rn, re, rei, an, ae, aei, index, ef
+
+
 class PilotNPYDataset(Dataset):
     """
     Base dataset over *all* rows in a file. Train/val selection is done via Subset indices.
@@ -157,6 +206,8 @@ class PilotNPYDataset(Dataset):
         sanitize: bool = True,
         warn_sanitize: bool = True,
         max_warn_sanitize: int = 20,
+        fallback: str = "warn",  # error|warn|silent
+        fallback_mutation_index: str = "center",  # center|hash
     ):
         self.split_tsv = split_tsv
         self.input_dir = os.path.join(feature_dir, input_subdir)
@@ -169,6 +220,10 @@ class PilotNPYDataset(Dataset):
         self.warn_sanitize = warn_sanitize
         self.max_warn_sanitize = max_warn_sanitize
         self._warned_sanitize = 0
+
+        self.fallback = fallback
+        self.fallback_mutation_index = fallback_mutation_index
+        self.fallback_count = 0
 
         self.sanitized_values = 0
         self.bad_index_count = 0
@@ -210,115 +265,131 @@ class PilotNPYDataset(Dataset):
             res_x[:, RN_MSA_CONS] = 0.0
         return res_x
 
-    def _required_paths(self, mut_id: str, suffix: str) -> List[str]:
-        base = os.path.join(self.input_dir, f"{mut_id}_")
-        return [
-            base + f"RN_{suffix}.npy",
-            base + f"RE_{suffix}.npy",
-            base + f"REI_{suffix}.npy",
-            base + f"AN_{suffix}.npy",
-            base + f"AE_{suffix}.npy",
-            base + f"AEI_{suffix}.npy",
-            base + f"I_{suffix}.npy",
-            base + f"EF_{suffix}.npy",
-        ]
-
-    def _load_one(self, mut_id: str, suffix: str, abl: Ablations):
+    def _load_one(self, mut_id: str, suffix: str, abl: Ablations) -> Tuple[Tuple[torch.Tensor, ...], bool, str]:
+        """
+        Returns: (tensors_tuple, used_fallback, fallback_reason)
+        """
         base = os.path.join(self.input_dir, f"{mut_id}_")
 
-        res_x = np.load(base + f"RN_{suffix}.npy").astype(float)
-        res_e = np.load(base + f"RE_{suffix}.npy").astype(float)
-        res_ei = np.load(base + f"REI_{suffix}.npy").astype(int)
+        paths = {
+            "RN": base + f"RN_{suffix}.npy",
+            "RE": base + f"RE_{suffix}.npy",
+            "REI": base + f"REI_{suffix}.npy",
+            "AN": base + f"AN_{suffix}.npy",
+            "AE": base + f"AE_{suffix}.npy",
+            "AEI": base + f"AEI_{suffix}.npy",
+            "I": base + f"I_{suffix}.npy",
+            "EF": base + f"EF_{suffix}.npy",
+        }
 
-        atom_x = np.load(base + f"AN_{suffix}.npy").astype(float)
-        atom_e = np.load(base + f"AE_{suffix}.npy").astype(float)
-        atom_ei = np.load(base + f"AEI_{suffix}.npy").astype(int)
+        missing = [k for k, p in paths.items() if not os.path.exists(p)]
+        used_fallback = False
+        fallback_reason = ""
 
-        index = np.load(base + f"I_{suffix}.npy").astype(int)
-        extra = np.load(base + f"EF_{suffix}.npy").astype(float)
+        if missing:
+            if self.fallback == "error":
+                raise FileNotFoundError(f"Missing {missing} for {mut_id} {suffix}")
+            used_fallback = True
+            fallback_reason = f"missing_files:{','.join(missing)}"
+            self.fallback_count += 1
 
-        if not _validate_index_list(index, n_atoms=atom_x.shape[0]):
-            raise ValueError(f"Bad atom->res index list for {mut_id} {suffix}: shape={index.shape} n_atoms={atom_x.shape[0]}")
+            mi = _fallback_mut_index(mut_id, self.fallback_mutation_index)
+            rn, re, rei, an, ae, aei, index, ef = make_fallback_inputs(mut_id, suffix, mut_index=mi)
+        else:
+            rn = np.load(paths["RN"]).astype(float)
+            re = np.load(paths["RE"]).astype(float)
+            rei = np.load(paths["REI"]).astype(int)
 
-        # preprocessing identical to predict.py
-        res_x[:, :-1] = Standardization(res_x[:, :-1])
-        res_e = Normalization(res_e)
-        atom_e = Normalization(atom_e)
+            an = np.load(paths["AN"]).astype(float)
+            ae = np.load(paths["AE"]).astype(float)
+            aei = np.load(paths["AEI"]).astype(int)
 
-        if self.sanitize:
-            fixed = 0
-            fixed += _nan_to_num_inplace(res_x)
-            fixed += _nan_to_num_inplace(res_e)
-            fixed += _nan_to_num_inplace(atom_x)
-            fixed += _nan_to_num_inplace(atom_e)
-            fixed += _nan_to_num_inplace(extra)
-            self.sanitized_values += fixed
-            if fixed and self.warn_sanitize and self._warned_sanitize < self.max_warn_sanitize:
-                self._warned_sanitize += 1
-                warnings.warn(f"[PilotNPYDataset] Sanitized {fixed} non-finite values for mut_id={mut_id} ({suffix}).")
-                if self._warned_sanitize == self.max_warn_sanitize:
-                    warnings.warn("[PilotNPYDataset] Reached max_warn_sanitize; suppressing further sanitize warnings.")
+            index = np.load(paths["I"]).astype(int)
+            ef = np.load(paths["EF"]).astype(float)
 
-        # ablations
-        res_x = self._apply_rn_ablations(res_x, abl)
-        if abl.no_residue_edges:
-            res_e[:] = 0.0
-        if abl.no_atom_nodes:
-            atom_x[:] = 0.0
-        if abl.no_atom_edges:
-            atom_e[:] = 0.0
-        if abl.no_esm2:
-            extra[:] = 0.0
+            if not _validate_index_list(index, n_atoms=an.shape[0]):
+                raise ValueError(f"Bad atom->res index list for {mut_id} {suffix}: shape={index.shape} n_atoms={an.shape[0]}")
 
-        return (
-            torch.tensor(res_x, dtype=torch.float32),
-            torch.tensor(res_ei, dtype=torch.int64),
-            torch.tensor(res_e, dtype=torch.float32),
-            torch.tensor(atom_x, dtype=torch.float32),
-            torch.tensor(atom_ei, dtype=torch.int64),
-            torch.tensor(atom_e, dtype=torch.float32),
-            torch.tensor(extra, dtype=torch.float32),
+            # preprocessing identical to predict.py
+            rn[:, :-1] = Standardization(rn[:, :-1])
+            re = Normalization(re)
+            ae = Normalization(ae)
+
+            if self.sanitize:
+                fixed = 0
+                fixed += _nan_to_num_inplace(rn)
+                fixed += _nan_to_num_inplace(re)
+                fixed += _nan_to_num_inplace(an)
+                fixed += _nan_to_num_inplace(ae)
+                fixed += _nan_to_num_inplace(ef)
+                self.sanitized_values += fixed
+                if fixed and self.warn_sanitize and self._warned_sanitize < self.max_warn_sanitize:
+                    self._warned_sanitize += 1
+                    warnings.warn(f"[PilotNPYDataset] Sanitized {fixed} non-finite values for mut_id={mut_id} ({suffix}).")
+                    if self._warned_sanitize == self.max_warn_sanitize:
+                        warnings.warn("[PilotNPYDataset] Reached max_warn_sanitize; suppressing further sanitize warnings.")
+
+            # ablations
+            rn = self._apply_rn_ablations(rn, abl)
+            if abl.no_residue_edges:
+                re[:] = 0.0
+            if abl.no_atom_nodes:
+                an[:] = 0.0
+            if abl.no_atom_edges:
+                ae[:] = 0.0
+            if abl.no_esm2:
+                ef[:] = 0.0
+
+        # If we used fallback, optionally warn (once-ish)
+        if used_fallback and self.fallback == "warn" and self._warned_missing < self.max_warn_missing:
+            self._warned_missing += 1
+            warnings.warn(f"[PilotNPYDataset] Using fallback inputs for mut_id={mut_id} {suffix} ({fallback_reason})")
+            if self._warned_missing == self.max_warn_missing:
+                warnings.warn("[PilotNPYDataset] Reached max_warn_missing; suppressing further fallback warnings.")
+
+        tensors = (
+            torch.tensor(rn, dtype=torch.float32),
+            torch.tensor(rei, dtype=torch.int64),
+            torch.tensor(re, dtype=torch.float32),
+            torch.tensor(an, dtype=torch.float32),
+            torch.tensor(aei, dtype=torch.int64),
+            torch.tensor(ae, dtype=torch.float32),
+            torch.tensor(ef, dtype=torch.float32),
             torch.tensor(index, dtype=torch.int64),
         )
+        return tensors, used_fallback, fallback_reason
 
     def __getitem__(self, idx):
         pdb, chain, mut_pos, residue, y = self.rows[idx]
         mut_id, _, _ = mut_id_from_row(pdb, chain, mut_pos, residue)
         abl: Ablations = getattr(self, "_ablations", Ablations())
 
-        missing = []
-        for suffix in ("wt", "mt"):
-            for p in self._required_paths(mut_id, suffix):
-                if not os.path.exists(p):
-                    missing.append(p)
-
-        if missing:
+        try:
+            wt_tensors, wt_fb, wt_reason = self._load_one(mut_id, "wt", abl)
+            mt_tensors, mt_fb, mt_reason = self._load_one(mut_id, "mt", abl)
+        except (FileNotFoundError, ValueError) as e:
+            # With fallback enabled, this should be rare (bad index list, etc.)
             self.missing_count += 1
             if self.missing_mut_ids is not None:
                 self.missing_mut_ids.add(mut_id)
             if self.warn_missing and self._warned_missing < self.max_warn_missing:
                 self._warned_missing += 1
-                warnings.warn(
-                    f"[PilotNPYDataset] Missing {len(missing)} input files for mut_id={mut_id}; skipping.\n"
-                    + "\n".join(missing[:8])
-                    + ("" if len(missing) <= 8 else f"\n... (+{len(missing)-8} more)")
-                )
-                if self._warned_missing == self.max_warn_missing:
-                    warnings.warn("[PilotNPYDataset] Reached max_warn_missing; suppressing further missing-file warnings.")
-            return None
-
-        try:
-            wt = self._load_one(mut_id, "wt", abl)
-            mt = self._load_one(mut_id, "mt", abl)
-        except ValueError as e:
-            self.bad_index_count += 1
-            warnings.warn(f"[PilotNPYDataset] {e}; skipping mut_id={mut_id}")
+                warnings.warn(f"[PilotNPYDataset] {e}; skipping mut_id={mut_id}")
             return None
 
         y = torch.tensor([[y]], dtype=torch.float32)
         rand = torch.tensor([[0.0]], dtype=torch.float32)
-        meta = {"pdb": pdb, "chain": chain, "mut_pos": mut_pos, "residue": residue, "mut_id": mut_id}
-        return (*wt, *mt, rand, y, meta)
+
+        meta = {
+            "pdb": pdb,
+            "chain": chain,
+            "mut_pos": mut_pos,
+            "residue": residue,
+            "mut_id": mut_id,
+            "used_fallback": bool(wt_fb or mt_fb),
+            "fallback_reason": ";".join([r for r in [wt_reason, mt_reason] if r]),
+        }
+        return (*wt_tensors, *mt_tensors, rand, y, meta)
 
 
 def collate_skip_none(batch):
@@ -331,7 +402,6 @@ def collate_skip_none(batch):
 
 
 def make_loader(ds, ablations: Ablations, shuffle: bool, seed: int, num_workers: int = 0):
-    # If ds is a Subset, attach ablations to the underlying dataset.
     base = ds.dataset if isinstance(ds, Subset) else ds
     if isinstance(base, PilotNPYDataset):
         base._ablations = ablations  # type: ignore[attr-defined]
@@ -361,6 +431,7 @@ def train_one_epoch(model, loader, optim, device):
     used = 0
     skipped_missing = 0
     skipped_nan = 0
+    used_fallback = 0
 
     for sample in loader:
         if sample is None:
@@ -370,6 +441,9 @@ def train_one_epoch(model, loader, optim, device):
         (res_x_wt, res_ei_wt, res_e_wt, atom_x_wt, atom_ei_wt, atom_e_wt, extra_wt, index_wt,
          res_x_mt, res_ei_mt, res_e_mt, atom_x_mt, atom_ei_mt, atom_e_mt, extra_mt, index_mt,
          rand, y, meta) = sample
+
+        if meta.get("used_fallback", False):
+            used_fallback += 1
 
         # to device
         res_x_wt = res_x_wt.to(device); res_ei_wt = res_ei_wt.to(device); res_e_wt = res_e_wt.to(device)
@@ -410,7 +484,7 @@ def train_one_epoch(model, loader, optim, device):
         used += 1
 
     avg = total_loss / used if used > 0 else float("nan")
-    return avg, {"used": used, "skipped_missing": skipped_missing, "skipped_nan": skipped_nan}
+    return avg, {"used": used, "skipped_missing": skipped_missing, "skipped_nan": skipped_nan, "used_fallback": used_fallback}
 
 
 @torch.no_grad()
@@ -423,6 +497,7 @@ def evaluate_and_collect(model, loader, device):
     used = 0
     skipped_missing = 0
     skipped_nan = 0
+    used_fallback = 0
 
     for sample in loader:
         if sample is None:
@@ -432,6 +507,9 @@ def evaluate_and_collect(model, loader, device):
         (res_x_wt, res_ei_wt, res_e_wt, atom_x_wt, atom_ei_wt, atom_e_wt, extra_wt, index_wt,
          res_x_mt, res_ei_mt, res_e_mt, atom_x_mt, atom_ei_mt, atom_e_mt, extra_mt, index_mt,
          rand, y, meta) = sample
+
+        if meta.get("used_fallback", False):
+            used_fallback += 1
 
         res_x_wt = res_x_wt.to(device); res_ei_wt = res_ei_wt.to(device); res_e_wt = res_e_wt.to(device)
         atom_x_wt = atom_x_wt.to(device); atom_ei_wt = atom_ei_wt.to(device); atom_e_wt = atom_e_wt.to(device)
@@ -470,6 +548,8 @@ def evaluate_and_collect(model, loader, device):
             "exp.DDG": y_val,
             "pred.DDG": p_val,
             "mut_id": meta["mut_id"],
+            "used_fallback": int(meta.get("used_fallback", False)),
+            "fallback_reason": meta.get("fallback_reason", ""),
         })
         used += 1
 
@@ -487,13 +567,13 @@ def evaluate_and_collect(model, loader, device):
             "spearman": _spearmanr(ps, ys),
         }
 
-    return metrics, rows, {"used": used, "skipped_missing": skipped_missing, "skipped_nan": skipped_nan}
+    return metrics, rows, {"used": used, "skipped_missing": skipped_missing, "skipped_nan": skipped_nan, "used_fallback": used_fallback}
 
 
 def write_csv(path: str, rows: List[Dict[str, Any]]):
     import csv
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    fieldnames = ["PDB", "chain", "mut_pos", "residue", "exp.DDG", "pred.DDG", "mut_id"]
+    fieldnames = ["PDB", "chain", "mut_pos", "residue", "exp.DDG", "pred.DDG", "mut_id", "used_fallback", "fallback_reason"]
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
@@ -515,9 +595,6 @@ def _fmt(x: float, nd: int = 4) -> str:
 
 
 def make_pdb_disjoint_split(ds: PilotNPYDataset, seed: int, val_frac: float) -> Tuple[List[int], List[int], List[str]]:
-    """
-    Split ds indices into train/val by grouping on PDB (protein-disjoint by PDB).
-    """
     if not (0.0 < val_frac < 1.0):
         raise ValueError("--val-frac must be in (0,1)")
 
@@ -566,6 +643,12 @@ def main():
     ap.add_argument("--no-sanitize", dest="sanitize", action="store_false")
     ap.add_argument("--max-warn-sanitize", type=int, default=20)
 
+    # fallback behavior
+    ap.add_argument("--fallback", choices=["error", "warn", "silent"], default="warn",
+                    help="What to do if input .npy files are missing: error, warn+fallback, or silent+fallback.")
+    ap.add_argument("--fallback-mutation-index", choices=["center", "hash"], default="center",
+                    help="Where to place the 'is_mut' flag in fallback RN (16 residues).")
+
     # coarse modality ablations
     ap.add_argument("--no_residue_nodes", action="store_true")
     ap.add_argument("--no_residue_edges", action="store_true")
@@ -611,6 +694,7 @@ def main():
     print(f"epochs        : {args.epochs}", flush=True)
     print(f"lr            : {args.lr}", flush=True)
     print(f"sanitize      : {args.sanitize}", flush=True)
+    print(f"fallback      : {args.fallback} (mut_index={args.fallback_mutation_index})", flush=True)
     print(f"ablations     : {ablation_tag(ablations)}", flush=True)
     print(f"val_frac      : {args.val_frac}", flush=True)
     print("=" * 88, flush=True)
@@ -624,6 +708,8 @@ def main():
         missing_mut_ids=missing_mut_ids,
         sanitize=args.sanitize,
         max_warn_sanitize=args.max_warn_sanitize,
+        fallback=args.fallback,
+        fallback_mutation_index=args.fallback_mutation_index,
     )
     test_ds = PilotNPYDataset(
         args.test, args.feature_dir,
@@ -631,6 +717,8 @@ def main():
         missing_mut_ids=missing_mut_ids,
         sanitize=args.sanitize,
         max_warn_sanitize=args.max_warn_sanitize,
+        fallback=args.fallback,
+        fallback_mutation_index=args.fallback_mutation_index,
     )
     print(f"[data] Train rows (pre-split): {len(train_all)} | Test rows: {len(test_ds)}", flush=True)
 
@@ -665,7 +753,7 @@ def main():
         f"{'epoch':>5} | {'train_mse':>10} | "
         f"{'val_rmse':>9} {'val_mae':>9} {'val_r':>8} {'val_rho':>8} | "
         f"{'test_rmse':>9} {'test_r':>8} | "
-        f"{'train used/miss/nan':>18} | {'val used/miss/nan':>17} | {'best_val':>9}"
+        f"{'train used/miss/nan/fb':>21} | {'val used/miss/nan/fb':>20} | {'best_val':>9}"
     )
     print("-" * len(header), flush=True)
     print(header, flush=True)
@@ -686,8 +774,8 @@ def main():
             f"{_fmt(va_metrics['rmse']):>9} {_fmt(va_metrics['mae']):>9} "
             f"{_fmt(va_metrics['pearson'], 3):>8} {_fmt(va_metrics['spearman'], 3):>8} | "
             f"{_fmt(te_metrics.get('rmse', float('nan'))):>9} {_fmt(te_metrics.get('pearson', float('nan')), 3):>8} | "
-            f"{tr_counts['used']:5d}/{tr_counts['skipped_missing']:4d}/{tr_counts['skipped_nan']:3d} | "
-            f"{va_counts['used']:5d}/{va_counts['skipped_missing']:4d}/{va_counts['skipped_nan']:3d} | "
+            f"{tr_counts['used']:5d}/{tr_counts['skipped_missing']:4d}/{tr_counts['skipped_nan']:3d}/{tr_counts['used_fallback']:3d} | "
+            f"{va_counts['used']:5d}/{va_counts['skipped_missing']:4d}/{va_counts['skipped_nan']:3d}/{va_counts['used_fallback']:3d} | "
             f"{_fmt(best_val_rmse):>9}"
         )
         print(line, flush=True)
@@ -700,11 +788,14 @@ def main():
                 "ablations": ablation_tag(ablations),
                 "val_frac": args.val_frac,
                 "val_pdbs": va_pdbs,
+                "fallback": args.fallback,
+                "fallback_mutation_index": args.fallback_mutation_index,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optim.state_dict(),
                 "metrics_val": va_metrics,
                 "metrics_test": te_metrics if do_test else None,
                 "counts": {"train": tr_counts, "val": va_counts},
+                "dataset_stats": {"fallback_count_train_all": train_all.fallback_count, "fallback_count_test": test_ds.fallback_count},
             },
             last_ckpt_path,
         )
@@ -719,6 +810,8 @@ def main():
                     "ablations": ablation_tag(ablations),
                     "val_frac": args.val_frac,
                     "val_pdbs": va_pdbs,
+                    "fallback": args.fallback,
+                    "fallback_mutation_index": args.fallback_mutation_index,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optim.state_dict(),
                     "metrics_val": va_metrics,
@@ -727,7 +820,6 @@ def main():
             )
             write_csv(best_val_csv_path, va_rows)
 
-            # Save test predictions corresponding to the best-val model
             te_metrics2, te_rows2, _ = evaluate_and_collect(model, test_loader, device)
             write_csv(best_test_csv_path, te_rows2)
 
@@ -740,6 +832,7 @@ def main():
     print(f"[done] dataset missing counts: train={train_all.missing_count} test={test_ds.missing_count}", flush=True)
     print(f"[done] sanitized_values: train={train_all.sanitized_values} test={test_ds.sanitized_values}", flush=True)
     print(f"[done] bad_index: train={train_all.bad_index_count} test={test_ds.bad_index_count}", flush=True)
+    print(f"[done] fallback_count: train_all={train_all.fallback_count} test={test_ds.fallback_count}", flush=True)
     print(f"[done] missing mut_id count (union): {len(missing_mut_ids)}", flush=True)
 
     if args.write_missing is not None:
