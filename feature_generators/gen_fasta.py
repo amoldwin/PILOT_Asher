@@ -26,10 +26,39 @@ NON_STANDARD_SUBSTITUTIONS = {
 }
 
 
-def read_pdb(pdbfile, chain_id):
+def _get_single_chain_id_from_pdb(pdbfile: str) -> str | None:
+    """
+    Return the only chain id present in model 0 if there is exactly one chain; else None.
+    """
     parser = PDBParser(QUIET=True)
     struct = parser.get_structure('PDB', pdbfile)
     model = struct[0]
+    chains = [c.id for c in model.get_chains()]
+    if len(chains) == 1:
+        return chains[0]
+    return None
+
+
+def read_pdb(pdbfile, chain_id):
+    """
+    Read sequence and residue positions from a PDB chain.
+
+    For ESMFold-generated single-chain PDBs, users often supply an arbitrary chain ID
+    in the mutation list. If the requested chain is missing but the PDB has exactly one
+    chain, we fall back to that chain automatically.
+    """
+    parser = PDBParser(QUIET=True)
+    struct = parser.get_structure('PDB', pdbfile)
+    model = struct[0]
+
+    if chain_id not in model.child_dict:
+        single = _get_single_chain_id_from_pdb(pdbfile)
+        if single is not None:
+            chain_id = single
+        else:
+            available = [c.id for c in model.get_chains()]
+            raise ValueError(f"Chain '{chain_id}' not found in {pdbfile}. Available chains: {available}")
+
     chain = model[chain_id]
     seq, position = '', []
 
@@ -75,6 +104,10 @@ def gen_all_fasta(
 
     wild_pdb = f'{cleaned_pdb_dir}/{pdb_id}_{chain_id}.pdb'
     mut_pdb = f'{cleaned_pdb_dir}/{mut_id}.pdb'
+
+    if not os.path.exists(wild_pdb) or os.path.getsize(wild_pdb) == 0:
+        raise FileNotFoundError(f"WT cleaned PDB missing or empty: {wild_pdb}")
+
     wild_seq, pdb_positions = read_pdb(wild_pdb, chain_id)
 
     if mutated_by_structure and os.path.exists(mut_pdb):
@@ -84,11 +117,9 @@ def gen_all_fasta(
         if mut_pos not in pdb_positions:
             raise ValueError(f'mut_pos {mut_pos} not found in {pdb_id}_{chain_id} positions {pdb_positions[:5]}...')
         idx = pdb_positions.index(mut_pos)
-        if wild_seq[idx] != wild_type:
-            # warn but still replace
-            pass
         mut_seq = wild_seq[:idx] + mutant + wild_seq[idx + 1:]
 
+    os.makedirs(fasta_dir, exist_ok=True)
     wild_fasta = f'{fasta_dir}/{pdb_id}_{chain_id}.fasta'
     mut_fasta = f'{fasta_dir}/{mut_id}.fasta'
 

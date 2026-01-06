@@ -3,10 +3,9 @@ import numpy as np
 from scipy.spatial.distance import pdist, squareform
 import itertools
 from Bio.PDB.Polypeptide import three_to_one
+from Bio.PDB import PDBParser
 
 pdb_dir = '/storage3/database/datasets/dataset_ddG/5.0/all_pdb'
-
-
 
 NON_STANDARD_SUBSTITUTIONS = {
     'GLH': 'GLU', 'ASH': 'ASP', 'CYX': 'CYS', 'HID': 'HIS', 'HIE': 'HIS', 'HIP': 'HIS', '2AS': 'ASP', '3AH': 'HIS',
@@ -31,31 +30,38 @@ NON_STANDARD_SUBSTITUTIONS = {
 }
 
 
+def _single_chain_id_from_file(pdb_file: str):
+    parser = PDBParser(QUIET=True)
+    s = parser.get_structure("PDB", pdb_file)
+    m = s[0]
+    chains = [c.id for c in m.get_chains()]
+    if len(chains) == 1:
+        return chains[0]
+    return None
+
+
 def get_pdb_array(pdb_file, chain_id):
     pdb_array = []
     with open(pdb_file, 'r') as pdbfile:
         for line in pdbfile:
             if line[0:4] == 'ATOM' or line[0:4] == 'HETA':
                 line_list = [line[0:5], line[6:11], line[12:16], line[16], line[17:20], line[21], line[22:27],
-                                line[30:38],
-                                line[38:46], line[46:54]]
+                             line[30:38],
+                             line[38:46], line[46:54]]
                 line_list = [i.strip() for i in line_list]
                 if (line_list[0] == 'ATOM' or line_list[0] == 'HETAT') and line_list[5] == chain_id and line_list[4] != 'HOH':
                     pdb_array.append(line_list)
     return np.array(pdb_array, dtype='str')
 
 
-
 def get_residue_info(pdb_array):
-    atom_res_array = pdb_array[:, 6]  # 每一个原子对应的氨基酸编号
-    # print(atom_res_array)
-    boundary_list = []  # 列表中代表每一个氨基酸的起始原子和终止原子的位置
+    atom_res_array = pdb_array[:, 6]
+    boundary_list = []
     pdb_pos_list = []
     start_pointer = 0
     curr_pointer = 0
     curr_atom = atom_res_array[0]
 
-    # One pass through the list of residue numbers and record row number boundaries. Both sides inclusive.
     while (curr_pointer < atom_res_array.shape[0] - 1):
         curr_pointer += 1
         if atom_res_array[curr_pointer] != curr_atom:
@@ -72,7 +78,6 @@ def get_residue_distance_matrix(pdb_array, residue_index, distance_type):
     if distance_type == 'c_alpha':
         coord_array = np.empty((residue_index.shape[0], 3))
         for i in range(residue_index.shape[0]):
-            # 获取每一个氨基酸中α碳原子的位置，若该氨基酸中有α碳原子，则取其位置，否则，则取该氨基酸中所有原子的平均值
             res_start, res_end = residue_index[i]
             flag = False
             res_array = pdb_array[res_start:res_end + 1]
@@ -110,15 +115,21 @@ def get_nearest_resindex(pdb_file, chain_id, mut_pos, aa_num=16):
     selectes_pdb_pos = []
     atompos2index = {}
     new_pdb_array = []
+
     pdb_array = get_pdb_array(pdb_file, chain_id)
 
-    # ---- NEW: handle empty chain early ----
+    # If chain mismatch (common with single-chain ESMFold), retry using the only chain.
+    if pdb_array.ndim != 2 or pdb_array.shape[0] == 0:
+        single = _single_chain_id_from_file(pdb_file)
+        if single is not None and single != chain_id:
+            pdb_array = get_pdb_array(pdb_file, single)
+            chain_id = single
+
     if pdb_array.ndim != 2 or pdb_array.shape[0] == 0:
         return [], {}, np.array([], dtype='str')
 
     residue_index, pdb_pos_list = get_residue_info(pdb_array)
 
-    # ---- NEW: if mut_pos not in list, fail cleanly ----
     if mut_pos not in pdb_pos_list:
         return [], {}, np.array([], dtype='str')
 
@@ -136,7 +147,6 @@ def get_nearest_resindex(pdb_file, chain_id, mut_pos, aa_num=16):
                 new_pdb_array.append(list(atom_info))
                 index += 1
 
-    # ---- NEW: fallback if element filtering removed everything ----
     if len(new_pdb_array) == 0:
         atompos2index = {}
         index = 0
