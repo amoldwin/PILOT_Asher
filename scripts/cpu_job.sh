@@ -26,9 +26,15 @@ conda activate pilot
 ##  -parse_seqids \
 ##  -out /scratch/amoldwin/datasets/uniref90
 
-python gen_features.py \
-  -i dataset/mutation_list_missing.txt \
-  -d /scratch/amoldwin/datasets/PILOT \
-  -s precompute_psiblast_msa \
-  --sasa-backend freesasa \
-  --mutator-backend proxy
+## python gen_features.py \
+##   -i dataset/mutation_list_missing.txt \
+##   -d /scratch/amoldwin/datasets/PILOT \
+##   -s precompute_psiblast_msa \
+##   --sasa-backend freesasa \
+##   --mutator-backend proxy
+
+python import_geostab_files.py \
+  --source /projects/ashehu/amoldwin/GeoStab/data/dTm/S4346/ \
+  --feature-dir /scratch/amoldwin/datasets/PILOT_dTm \
+  --overwrite
+  

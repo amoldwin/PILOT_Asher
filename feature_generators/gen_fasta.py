@@ -43,22 +43,36 @@ def read_pdb(pdbfile, chain_id):
             except KeyError:
                 try:
                     aa = three_to_one(NON_STANDARD_SUBSTITUTIONS[amino_acid])
-                except:
+                except Exception:
                     continue
             seq += aa
             position.append(pos)
     return seq, position
 
 
-def gen_all_fasta(pdb_id, chain_id, mut_pos, wild_type, mutant,
-                  cleaned_pdb_dir, fasta_dir, mutated_by_structure=True):
+def gen_all_fasta(
+    pdb_id,
+    chain_id,
+    mut_pos,
+    wild_type,
+    mutant,
+    cleaned_pdb_dir,
+    fasta_dir,
+    mutated_by_structure=True,
+    mut_id=None,
+):
     """
     If mutated_by_structure is False, construct the mutant sequence by editing the wild sequence
     at mut_pos instead of reading a mutant PDB.
+
+    IMPORTANT: mut_id may be backend-tagged (e.g. ...__rosetta). If not provided, we fall back
+    to legacy naming (not recommended).
     """
     pdbpos2uniprotpos_dict = {}
 
-    mut_id = pdb_id + '_' + chain_id + '_' + wild_type + mut_pos + mutant
+    if mut_id is None:
+        mut_id = pdb_id + '_' + chain_id + '_' + wild_type + mut_pos + mutant
+
     wild_pdb = f'{cleaned_pdb_dir}/{pdb_id}_{chain_id}.pdb'
     mut_pdb = f'{cleaned_pdb_dir}/{mut_id}.pdb'
     wild_seq, pdb_positions = read_pdb(wild_pdb, chain_id)

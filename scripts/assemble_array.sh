@@ -14,6 +14,8 @@
 #SBATCH --array=0-15
 
 # Usage: sbatch slurm_assemble_array.sh dataset./mutation_list_filtered.txt /features
+##sbatch --array=0-$((N-1))%100 scripts/precompute_psiblast_msa_array.sh  "$MUT_LIST" "$FEATURE_DIR" "$SASA_BACKEND"
+
 MUT_LIST=$1
 FEATURE_DIR=$2
 

@@ -18,6 +18,9 @@ from feature_generators.get_edge import get_edge
 # FoldX is not available via conda; set this to your installation path (directory or binary).
 foldx_path = './software/foldx'
 
+# RosettaScripts (Hopper module provides this on PATH)
+rosetta_scripts_path = shutil.which('rosetta_scripts.static.linuxgccrelease') or 'rosetta_scripts.static.linuxgccrelease'
+
 # Auto-detect conda-installed tools on PATH; fall back to binary names if not found.
 dssp_path = shutil.which('mkdssp') or 'mkdssp'
 psi_path = shutil.which('psiblast') or 'psiblast'
@@ -109,19 +112,33 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
     row_pdb_dir, cleaned_pdb_dir, fasta_dir, pssm_dir, msa_dir, hhm_dir, sasa_dir, esm_dir, input_dir = _ensure_dirs(dir)
 
     pdb_chain = pdb_id + '_' + chain_id
-    mut_id = pdb_id + '_' + chain_id + '_' + wild_type + mut_pos + mutant
+
+    # Always backend-tag mutant id to avoid collisions and to match your requirement.
+    base_mut = pdb_id + '_' + chain_id + '_' + wild_type + mut_pos + mutant
+    mut_id = base_mut + '__' + mutator_backend
+
     print('--------------------------------------')
     print(f'Pipeline step "{step}" for mutation {mut_id}.')
     print('--------------------------------------')
 
     # Structures & FASTA (required for all downstream stages)
     print('Ensuring PDB and FASTA ...')
-    wild_pdb, mut_pdb, mutated_by_structure = gen_all_pdb(
-        pdb_id, chain_id, mut_pos, wild_type, mutant, row_pdb_dir, cleaned_pdb_dir, foldx_path, mutator_backend
+    wild_pdb, mut_pdb, mutated_by_structure, mut_id_from_pdb = gen_all_pdb(
+        pdb_id, chain_id, mut_pos, wild_type, mutant,
+        row_pdb_dir, cleaned_pdb_dir, foldx_path,
+        mutator_backend=mutator_backend,
+        rosetta_scripts_path=rosetta_scripts_path,
     )
+    # mut_id_from_pdb is the authoritative id used by gen_pdb (backend-tagged)
+    mut_id = mut_id_from_pdb
+
     wild_fasta, mut_fasta, wild_seq, mut_seq, pdb_positions, pdbpos2uniprotpos_dict = \
-        gen_all_fasta(pdb_id, chain_id, mut_pos, wild_type, mutant, cleaned_pdb_dir, fasta_dir,
-                      mutated_by_structure=mutated_by_structure)
+        gen_all_fasta(
+            pdb_id, chain_id, mut_pos, wild_type, mutant,
+            cleaned_pdb_dir, fasta_dir,
+            mutated_by_structure=mutated_by_structure,
+            mut_id=mut_id,
+        )
 
     if step == 'structures':
         return
@@ -145,7 +162,6 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
                 else:
                     mut_frsa = os.path.join(sasa_dir, f'{mut_id}.rsa')
                     mut_fasa = os.path.join(sasa_dir, f'{mut_id}.asa')
-                    # FIX: overwrite missing OR empty
                     if not _nonempty(mut_frsa):
                         shutil.copyfile(wild_frsa, mut_frsa)
                     if not _nonempty(mut_fasa):
@@ -158,7 +174,6 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
                 else:
                     mut_frsa = os.path.join(sasa_dir, f'{mut_id}.rsa')
                     mut_fasa = os.path.join(sasa_dir, f'{mut_id}.asa')
-                    # FIX: overwrite missing OR empty
                     if not _nonempty(mut_frsa):
                         shutil.copyfile(wild_frsa, mut_frsa)
                     if not _nonempty(mut_fasa):
@@ -195,7 +210,7 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
         if step == 'esm2':
             return
 
-    # Assemble (unchanged)
+    # Assemble
     print('Assembling features ...')
     wild_rsa = os.path.join(sasa_dir, f'{pdb_id}_{chain_id}.rsa')
     wild_asa = os.path.join(sasa_dir, f'{pdb_id}_{chain_id}.asa')
@@ -213,7 +228,6 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
     if mutated_by_structure:
         _ensure_sasa(mut_pdb, mut_rsa, mut_asa)
     else:
-        # FIX: overwrite missing OR empty
         if not _nonempty(mut_rsa):
             shutil.copyfile(wild_rsa, mut_rsa)
         if not _nonempty(mut_asa):
@@ -377,12 +391,22 @@ def main():
                         choices=['naccess', 'freesasa'], help='SASA backend to use.')
     parser.add_argument('--freesasa-path', dest='freesasa_path', type=str, default='freesasa',
                         help='Path to freesasa binary if not on PATH.')
+
     parser.add_argument('--mutator-backend', dest='mutator_backend', type=str, default='foldx',
-                        choices=['foldx', 'proxy'], help='Mutant structure builder: foldx or proxy (no structural change)')
+                        choices=['foldx', 'proxy', 'rosetta'],
+                        help='Mutant structure builder: foldx, rosetta, or proxy (no structural change).')
+
+    parser.add_argument('--rosetta-scripts-path', dest='rosetta_scripts_path', type=str,
+                        default=(shutil.which('rosetta_scripts.static.linuxgccrelease') or 'rosetta_scripts.static.linuxgccrelease'),
+                        help='Path to rosetta_scripts.static.linuxgccrelease (or mpi binary) if not on PATH.')
+
     args = parser.parse_args()
 
     global freesasa_path
     freesasa_path = args.freesasa_path
+
+    global rosetta_scripts_path
+    rosetta_scripts_path = args.rosetta_scripts_path
 
     with open(args.mutant_list, 'r') as f_r:
         for lnum, line in enumerate(f_r, 1):
