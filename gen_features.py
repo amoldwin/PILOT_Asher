@@ -15,13 +15,9 @@ from feature_generators.res_atom_selection import get_nearest_resindex, get_res_
 from feature_generators.feature_alignment import feature_alignment
 from feature_generators.get_edge import get_edge
 
-# FoldX is not available via conda; set this to your installation path (directory or binary).
 foldx_path = './software/foldx'
-
-# RosettaScripts (Hopper module provides this on PATH)
 rosetta_scripts_path = shutil.which('rosetta_scripts.static.linuxgccrelease') or 'rosetta_scripts.static.linuxgccrelease'
 
-# Auto-detect conda-installed tools on PATH; fall back to binary names if not found.
 dssp_path = shutil.which('mkdssp') or 'mkdssp'
 psi_path = shutil.which('psiblast') or 'psiblast'
 blastdbcmd_path = shutil.which('blastdbcmd') or 'blastdbcmd'
@@ -29,16 +25,12 @@ clustalo_path = shutil.which('clustalo') or 'clustalo'
 hhblits_path = shutil.which('hhblits') or 'hhblits'
 freesasa_path = shutil.which('freesasa') or 'freesasa'
 
-# Databases
 uniref90_path = '/scratch/amoldwin/datasets/uniref90/uniref90'
 uniRef30_path = os.environ.get('HHBLITS_DB', './software/database/uniref30/UniRef30_2022_02')
-
-# Naccess is NOT conda-installable. Use 'freesasa' backend if you don't have Naccess.
 naccess_path = './software/naccess2.1.1/naccess'
 
 
 def _nonempty(p: str) -> bool:
-    """True iff path exists and has size > 0."""
     try:
         return os.path.exists(p) and os.path.getsize(p) > 0
     except OSError:
@@ -108,32 +100,19 @@ def gen_features(
     step='all',
     mutator_backend='foldx',
     skip_pdb_download: bool = False,
+    row_pdb_name_mode: str = "pdb",
+    row_pdb_suffix: str = "",
 ):
-    """
-    step: one of
-      - all
-      - structures
-      - precompute
-      - precompute_psiblast_msa   (psiblast + msa + sasa, no hhblits)
-      - precompute_hhblits        (hhblits only)
-      - esm2
-      - assemble
-    """
     row_pdb_dir, cleaned_pdb_dir, fasta_dir, pssm_dir, msa_dir, hhm_dir, sasa_dir, esm_dir, input_dir = _ensure_dirs(dir)
 
-    pdb_chain = pdb_id + '_' + chain_id  # WT id (backend-agnostic)
-
-    # Sequence ID for mutant (backend-agnostic)
+    pdb_chain = pdb_id + '_' + chain_id
     seq_id = pdb_id + '_' + chain_id + '_' + wild_type + mut_pos + mutant
-
-    # Structure ID for mutant (backend-tagged)
     struct_id = seq_id + '__' + mutator_backend
 
     print('--------------------------------------')
     print(f'Pipeline step "{step}" for mutation {struct_id}.')
     print('--------------------------------------')
 
-    # Structures (mutant PDB keyed by struct_id)
     print('Ensuring PDB and FASTA ...')
     wild_pdb, mut_pdb, mutated_by_structure, mut_id_from_pdb = gen_all_pdb(
         pdb_id, chain_id, mut_pos, wild_type, mutant,
@@ -141,10 +120,11 @@ def gen_features(
         mutator_backend=mutator_backend,
         rosetta_scripts_path=rosetta_scripts_path,
         download_pdb=(not skip_pdb_download),
+        row_pdb_name_mode=row_pdb_name_mode,
+        row_pdb_suffix=row_pdb_suffix,
     )
     struct_id = mut_id_from_pdb
 
-    # FASTA
     wild_fasta, mut_fasta, wild_seq, mut_seq, pdb_positions, pdbpos2uniprotpos_dict = gen_all_fasta(
         pdb_id, chain_id, mut_pos, wild_type, mutant,
         cleaned_pdb_dir, fasta_dir,
@@ -162,7 +142,6 @@ def gen_features(
 
     if step in ['all', 'precompute', 'precompute_psiblast_msa', 'precompute_hhblits']:
 
-        # SASA: WT uses pdb_chain; mutant SASA uses struct_id (structure-dependent)
         if do_sasa:
             if sasa_backend.lower() == 'freesasa':
                 print('Using FreeSASA ...')
@@ -189,13 +168,11 @@ def gen_features(
                     if not _nonempty(mut_fasa):
                         shutil.copyfile(wild_fasa, mut_fasa)
 
-        # PSI-BLAST + PSSM + rawmsa (sequence-derived -> seq_id)
         if do_psiblast:
             print('Using psiblast ...')
             wild_frawmsa, wild_fpssm = use_psiblast(wild_fasta, pssm_dir, psi_path, uniref90_path)
             mut_frawmsa, mut_fpssm = use_psiblast(mut_fasta, pssm_dir, psi_path, uniref90_path)
 
-        # MSA (sequence-derived -> seq_id)
         if do_msa:
             print('Generating MSA files ...')
             wild_frawmsa = os.path.join(pssm_dir, f'{pdb_chain}.rawmsa')
@@ -203,7 +180,6 @@ def gen_features(
             _ = gen_msa(pdb_chain, wild_seq, wild_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
             _ = gen_msa(seq_id, mut_seq, mut_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
 
-        # HHblits (sequence-derived -> seq_id)
         if do_hhblits:
             print('Using hhblits ...')
             _ = use_hhblits(pdb_chain, wild_fasta, hhblits_path, uniRef30_path, hhm_dir)
@@ -212,7 +188,6 @@ def gen_features(
         if step in ['precompute', 'precompute_psiblast_msa', 'precompute_hhblits']:
             return
 
-    # ESM2 (sequence-derived -> seq_id)
     if step in ['all', 'esm2']:
         print('Using esm2 ...')
         use_esm2(wild_fasta, pdb_chain, esm_dir)
@@ -220,7 +195,6 @@ def gen_features(
         if step == 'esm2':
             return
 
-    # Assemble
     print('Assembling features ...')
 
     wild_rsa = os.path.join(sasa_dir, f'{pdb_id}_{chain_id}.rsa')
@@ -254,7 +228,6 @@ def gen_features(
     wild_depth = calc_depth(wild_pdb, chain_id)
     mut_depth = calc_depth(mut_pdb if mutated_by_structure else wild_pdb, chain_id)
 
-    # PSSM (sequence-derived -> seq_id)
     wild_fpssm = os.path.join(pssm_dir, f'{pdb_chain}.pssm')
     mut_fpssm = os.path.join(pssm_dir, f'{seq_id}.pssm')
     if not os.path.exists(wild_fpssm) or not os.path.exists(mut_fpssm):
@@ -264,7 +237,6 @@ def gen_features(
     wild_pssm, wild_res_dict = get_pssm(wild_fpssm)
     mut_pssm, mut_res_dict = get_pssm(mut_fpssm)
 
-    # HHM (sequence-derived -> seq_id)
     wild_fhhm = os.path.join(hhm_dir, f'{pdb_chain}.hhm')
     mut_fhhm = os.path.join(hhm_dir, f'{seq_id}.hhm')
     if not os.path.exists(wild_fhhm) or not os.path.exists(mut_fhhm):
@@ -274,7 +246,6 @@ def gen_features(
     wild_hhm = process_hhm(wild_fhhm)
     mut_hhm = process_hhm(mut_fhhm)
 
-    # MSA (sequence-derived -> seq_id)
     wild_fmsa = os.path.join(msa_dir, f'{pdb_chain}.msa')
     mut_fmsa = os.path.join(msa_dir, f'{seq_id}.msa')
     if not os.path.exists(wild_fmsa) or not os.path.exists(mut_fmsa):
@@ -351,7 +322,6 @@ def gen_features(
     wild_mb_data = get_esm2(pdb_chain, wild_res_index_pos_dict, pdbpos2uniprotpos_dict, esm_dir)
     mut_mb_data = get_esm2(seq_id, mut_res_index_pos_dict, pdbpos2uniprotpos_dict, esm_dir)
 
-    # Save inputs (structure-dependent -> struct_id)
     res_node_wt_path = f'{input_dir}/{struct_id}_RN_wt.npy'
     res_edge_wt_path = f'{input_dir}/{struct_id}_RE_wt.npy'
     res_edge_index_wt_path = f'{input_dir}/{struct_id}_REI_wt.npy'
@@ -391,30 +361,25 @@ def gen_features(
 
 def main():
     parser = argparse.ArgumentParser(description='Step-aware feature generation for PILOT')
-    parser.add_argument('-i', '--mutant-list', dest='mutant_list', type=str, required=True,
-                        help='Input file: each line "pdb_id chain_id mut_pos amino_acid", e.g. 1A23 A 32 H/S')
-    parser.add_argument('-d', '--feature-dir', dest='dir', type=str, required=True,
-                        help='Root path to store intermediate features and model inputs.')
+    parser.add_argument('-i', '--mutant-list', dest='mutant_list', type=str, required=True)
+    parser.add_argument('-d', '--feature-dir', dest='dir', type=str, required=True)
     parser.add_argument('-s', '--step', dest='step', type=str, default='all',
-                        choices=['all', 'structures', 'precompute', 'precompute_psiblast_msa', 'precompute_hhblits',
-                                 'esm2', 'assemble'],
-                        help='Which pipeline step to run.')
-    parser.add_argument('--sasa-backend', dest='sasa_backend', type=str, default='naccess',
-                        choices=['naccess', 'freesasa'], help='SASA backend to use.')
-    parser.add_argument('--freesasa-path', dest='freesasa_path', type=str, default='freesasa',
-                        help='Path to freesasa binary if not on PATH.')
-
-    parser.add_argument('--mutator-backend', dest='mutator_backend', type=str, default='foldx',
-                        choices=['foldx', 'proxy', 'rosetta'],
-                        help='Mutant structure builder: foldx, rosetta, or proxy (no structural change).')
-
+                        choices=['all', 'structures', 'precompute', 'precompute_psiblast_msa', 'precompute_hhblits', 'esm2', 'assemble'])
+    parser.add_argument('--sasa-backend', dest='sasa_backend', type=str, default='naccess', choices=['naccess', 'freesasa'])
+    parser.add_argument('--freesasa-path', dest='freesasa_path', type=str, default='freesasa')
+    parser.add_argument('--mutator-backend', dest='mutator_backend', type=str, default='foldx', choices=['foldx', 'proxy', 'rosetta'])
     parser.add_argument('--rosetta-scripts-path', dest='rosetta_scripts_path', type=str,
-                        default=(shutil.which('rosetta_scripts.static.linuxgccrelease') or 'rosetta_scripts.static.linuxgccrelease'),
-                        help='Path to rosetta_scripts.static.linuxgccrelease (or mpi binary) if not on PATH.')
+                        default=(shutil.which('rosetta_scripts.static.linuxgccrelease') or 'rosetta_scripts.static.linuxgccrelease'))
 
-    # NEW: disable PDB download
     parser.add_argument('--skip-pdb-download', dest='skip_pdb_download', action='store_true',
-                        help='Do not download PDBs from RCSB. Require FEATURE_DIR/row_pdb/{pdb_id}.pdb to already exist.')
+                        help='Do not download PDBs from RCSB; require row_pdb files to exist.')
+
+    # NEW: row_pdb naming controls (for ESMFold inputs)
+    parser.add_argument('--row-pdb-name-mode', dest='row_pdb_name_mode', default='pdb',
+                        choices=['pdb', 'pdb_chain'],
+                        help='How to name row_pdb inputs: {pdb_id}.pdb or {pdb_id}_{chain_id}.pdb.')
+    parser.add_argument('--row-pdb-suffix', dest='row_pdb_suffix', default='',
+                        help="Optional suffix appended before .pdb for row_pdb and cleaned_pdb WT files (e.g. '_esmfold').")
 
     args = parser.parse_args()
 
@@ -431,12 +396,8 @@ def main():
                 continue
             mut_info = raw.split()
             if len(mut_info) != 4:
-                raise ValueError(f'Malformed mutation line at {args.mutant_list}:{lnum}: '
-                                 f'expected 4 fields "pdb_id chain_id mut_pos amino_acid", got {len(mut_info)}: {raw!r}')
+                raise ValueError(f"Malformed line {lnum}: {raw!r}")
             pdb_id, chain_id, mut_pos, aa_field = mut_info
-            if '/' not in aa_field or len(aa_field) < 3:
-                raise ValueError(f'Malformed amino_acid field at {args.mutant_list}:{lnum}: '
-                                 f'expected like H/S, got {aa_field!r}')
             wild_type = aa_field[0]
             mutant = aa_field[-1]
             gen_features(
@@ -445,6 +406,8 @@ def main():
                 step=args.step,
                 mutator_backend=args.mutator_backend,
                 skip_pdb_download=args.skip_pdb_download,
+                row_pdb_name_mode=args.row_pdb_name_mode,
+                row_pdb_suffix=args.row_pdb_suffix,
             )
 
 

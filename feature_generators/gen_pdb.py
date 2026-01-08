@@ -2,7 +2,7 @@ import os
 import time
 import subprocess
 import shutil
-from typing import Optional
+from typing import Optional, Literal
 
 
 def _acquire_lock(lock_path: str, timeout_sec: int = 1800, poll_sec: float = 1.0):
@@ -26,23 +26,68 @@ def _release_lock(lock_path: str):
         pass
 
 
-def download_row_pdb(pdb_id, row_pdb_dir):
+def _nonempty(path: str) -> bool:
+    try:
+        return os.path.exists(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
+RowPdbNameMode = Literal["pdb", "pdb_chain"]
+
+
+def row_pdb_path(row_pdb_dir: str, pdb_id: str, chain_id: str, name_mode: RowPdbNameMode, suffix: str = "") -> str:
     """
-    Download the full PDB file to row_pdb_dir/.pdb.
+    Construct the expected row_pdb path for a given naming mode.
+
+    name_mode:
+      - "pdb":       {pdb_id}{suffix}.pdb
+      - "pdb_chain": {pdb_id}_{chain_id}{suffix}.pdb
+
+    suffix should include leading underscore if desired, e.g. "_esmfold".
+    """
+    if suffix and not suffix.startswith("_"):
+        # allow "esmfold" but normalize to "_esmfold"
+        suffix = "_" + suffix
+
+    if name_mode == "pdb":
+        base = f"{pdb_id}{suffix}"
+    elif name_mode == "pdb_chain":
+        base = f"{pdb_id}_{chain_id}{suffix}"
+    else:
+        raise ValueError(f"Unknown row_pdb_name_mode: {name_mode}")
+    return os.path.join(row_pdb_dir, base + ".pdb")
+
+
+def cleaned_pdb_path(cleaned_pdb_dir: str, pdb_id: str, chain_id: str, suffix: str = "") -> str:
+    """
+    Construct WT cleaned PDB output path. suffix should include leading underscore if desired.
+    """
+    if suffix and not suffix.startswith("_"):
+        suffix = "_" + suffix
+    return os.path.join(cleaned_pdb_dir, f"{pdb_id}_{chain_id}{suffix}.pdb")
+
+
+def download_row_pdb(pdb_id, row_pdb_dir, out_path: Optional[str] = None):
+    """
+    Download the full PDB file from RCSB.
+
+    By default writes row_pdb_dir/{pdb_id}.pdb, but if out_path is given, writes there instead.
     Safe for SLURM arrays: uses a lock + writes directly to target with wget -O.
     """
     os.makedirs(row_pdb_dir, exist_ok=True)
-    pdb_file = os.path.join(row_pdb_dir, pdb_id + ".pdb")
-    lock_path = os.path.join(row_pdb_dir, f".{pdb_id}.download.lock")
+    pdb_file = out_path or os.path.join(row_pdb_dir, pdb_id + ".pdb")
+    lock_key = os.path.basename(pdb_file)
+    lock_path = os.path.join(row_pdb_dir, f".{lock_key}.download.lock")
 
     # Fast path
-    if os.path.exists(pdb_file) and os.path.getsize(pdb_file) > 0:
+    if _nonempty(pdb_file):
         return pdb_file
 
     _acquire_lock(lock_path)
     try:
         # Re-check after waiting
-        if os.path.exists(pdb_file) and os.path.getsize(pdb_file) > 0:
+        if _nonempty(pdb_file):
             return pdb_file
 
         # Remove stale zero-byte file
@@ -61,7 +106,7 @@ def download_row_pdb(pdb_id, row_pdb_dir):
                 pass
             raise RuntimeError(f"Failed to download PDB {pdb_id} from {url}: {e}")
 
-        if not os.path.exists(pdb_file) or os.path.getsize(pdb_file) == 0:
+        if not _nonempty(pdb_file):
             raise RuntimeError(f"Downloaded PDB file is missing/empty: {pdb_file}")
 
         return pdb_file
@@ -69,28 +114,44 @@ def download_row_pdb(pdb_id, row_pdb_dir):
         _release_lock(lock_path)
 
 
-def cleaned_row_pdb(pdb_id, chain_id, row_pdb_dir, cleaned_pdb_dir):
+def cleaned_row_pdb(
+    pdb_id: str,
+    chain_id: str,
+    row_pdb_dir: str,
+    cleaned_pdb_dir: str,
+    row_pdb_file: Optional[str] = None,
+    cleaned_out_path: Optional[str] = None,
+):
     """
-    Extract ATOM/HETATM records for the given chain and write cleaned_pdb_dir/_.pdb.
+    Extract ATOM/HETATM records for the given chain and write cleaned_pdb_dir/{pdb_id}_{chain_id}.pdb
+    (or cleaned_out_path if given).
+
+    row_pdb_file:
+      - if provided, read from that file instead of row_pdb_dir/{pdb_id}.pdb
+    cleaned_out_path:
+      - if provided, write to that exact path (still in cleaned_pdb_dir typically)
+
     Safe for SLURM arrays: lock + atomic write (tmp file then os.replace).
     """
     os.makedirs(cleaned_pdb_dir, exist_ok=True)
-    row_pdb = os.path.join(row_pdb_dir, pdb_id + ".pdb")
-    cleaned_pdb = os.path.join(cleaned_pdb_dir, f"{pdb_id}_{chain_id}.pdb")
-    lock_path = os.path.join(cleaned_pdb_dir, f".{pdb_id}_{chain_id}.clean.lock")
+
+    row_pdb = row_pdb_file or os.path.join(row_pdb_dir, pdb_id + ".pdb")
+    cleaned_pdb = cleaned_out_path or os.path.join(cleaned_pdb_dir, f"{pdb_id}_{chain_id}.pdb")
+    lock_key = os.path.basename(cleaned_pdb)
+    lock_path = os.path.join(cleaned_pdb_dir, f".{lock_key}.clean.lock")
 
     # Fast path
-    if os.path.exists(cleaned_pdb) and os.path.getsize(cleaned_pdb) > 0:
+    if _nonempty(cleaned_pdb):
         return cleaned_pdb
 
     _acquire_lock(lock_path)
     try:
         # Re-check after waiting
-        if os.path.exists(cleaned_pdb) and os.path.getsize(cleaned_pdb) > 0:
+        if _nonempty(cleaned_pdb):
             return cleaned_pdb
 
         # Ensure source exists
-        if not os.path.exists(row_pdb) or os.path.getsize(row_pdb) == 0:
+        if not _nonempty(row_pdb):
             raise FileNotFoundError(f"row_pdb is missing/empty: {row_pdb}")
 
         tmp_path = cleaned_pdb + f".tmp_{os.getpid()}"
@@ -98,7 +159,6 @@ def cleaned_row_pdb(pdb_id, chain_id, row_pdb_dir, cleaned_pdb_dir):
 
         with open(row_pdb, "r") as f_r, open(tmp_path, "w") as f_w:
             for line in f_r:
-                # Only parse lines long enough
                 if len(line) < 54:
                     continue
                 rec = line[0:6].strip()
@@ -109,10 +169,9 @@ def cleaned_row_pdb(pdb_id, chain_id, row_pdb_dir, cleaned_pdb_dir):
                 if "ENDMDL" in line:
                     break
 
-        # Atomic replace
         os.replace(tmp_path, cleaned_pdb)
 
-        if (not wrote_any) or os.path.getsize(cleaned_pdb) == 0:
+        if (not wrote_any) or (not _nonempty(cleaned_pdb)):
             raise RuntimeError(
                 f"Cleaned PDB is empty for {pdb_id}_{chain_id}. "
                 f"Chain may not exist in the PDB or extraction failed: {cleaned_pdb}"
@@ -120,7 +179,6 @@ def cleaned_row_pdb(pdb_id, chain_id, row_pdb_dir, cleaned_pdb_dir):
 
         return cleaned_pdb
     finally:
-        # Cleanup tmp if present (in case of crash before replace)
         try:
             tmp_path = cleaned_pdb + f".tmp_{os.getpid()}"
             if os.path.exists(tmp_path):
@@ -131,9 +189,6 @@ def cleaned_row_pdb(pdb_id, chain_id, row_pdb_dir, cleaned_pdb_dir):
 
 
 def backend_tagged_mut_id(pdb_id: str, chain_id: str, mut_pos: str, wild_type: str, mutant: str, mutator_backend: str) -> str:
-    """
-    Return a backend-tagged mutant identifier to avoid collisions between foldx/proxy/rosetta.
-    """
     base = f"{pdb_id}_{chain_id}_{wild_type}{mut_pos}{mutant}"
     return f"{base}__{mutator_backend}"
 
@@ -158,31 +213,32 @@ def gen_mut_pdb_foldx(pdb_id, chain_id, mut_pos, wild_type, mutant, cleaned_pdb_
             pdbfile, "individual_list.txt", workdir, "./", workdir
         )
         os.system(cmd)
-
-        # FoldX writes {pdb_id}_{chain_id}_1.pdb
         os.system(f"cp {workdir}/{pdb_id}_{chain_id}_1.pdb  {out_pdb}")
 
     return out_pdb
 
 
+def _parse_mut_pos(mut_pos: str):
+    s = mut_pos.strip()
+    if not s:
+        raise ValueError("Empty mut_pos")
+    i = 0
+    while i < len(s) and s[i].isdigit():
+        i += 1
+    if i == 0:
+        raise ValueError(f"mut_pos does not start with digits: {mut_pos!r}")
+    resnum = int(s[:i])
+    icode = s[i:].strip()
+    return resnum, icode
+
+
 def _write_rosettascripts_xml(xml_path: str, chain_id: str, resnum: int, icode: str, mutant_aa: str, pack_radius: float = 8.0):
     """
-    Minimal RosettaScripts: mutate residue, repack neighborhood, minimize.
-    Uses PDB numbering (chain+resnum+icode).
+    NOTE: This XML is currently a placeholder in this branch of the repo.
+    If you plan to use rosetta backend, this should be replaced with a real RosettaScripts protocol.
     """
     icode_str = icode if icode else ""
-    res_spec = f"{resnum}{icode_str}"
-
-    xml = f"""
-    Minimal RosettaScripts: mutate residue, repack neighborhood, minimize.
-    Uses PDB numbering (chain+resnum+icode).
-    """
-    icode_str = icode if icode else ""
-    # Rosetta PDB residue selector supports insertion codes via "resnum+icode" in some builds;
-    # safest is to use explicit PDB numbering in a selector string.
-    # We'll use ResidueIndexSelector with "resnum+icode" and chain restriction via ChainSelector intersection.
-    res_spec = f"{resnum}{icode_str}"
-
+    _ = f"{resnum}{icode_str}"
     xml = f"""<ROSETTASCRIPTS>
   <SCOREFXNS>
     <ScoreFunction name="ref2015" weights="ref2015"/>
@@ -227,24 +283,6 @@ def _write_rosettascripts_xml(xml_path: str, chain_id: str, resnum: int, icode: 
         f.write(xml)
 
 
-def _parse_mut_pos(mut_pos: str):
-    """
-    mut_pos is like "32" or "32A" (insertion codes).
-    Returns (resnum:int, icode:str).
-    """
-    s = mut_pos.strip()
-    if not s:
-        raise ValueError("Empty mut_pos")
-    i = 0
-    while i < len(s) and s[i].isdigit():
-        i += 1
-    if i == 0:
-        raise ValueError(f"mut_pos does not start with digits: {mut_pos!r}")
-    resnum = int(s[:i])
-    icode = s[i:].strip()
-    return resnum, icode
-
-
 def gen_mut_pdb_rosetta(
     pdb_id: str,
     chain_id: str,
@@ -256,17 +294,10 @@ def gen_mut_pdb_rosetta(
     rosetta_scripts_path: str = "rosetta_scripts.static.linuxgccrelease",
     pack_radius: float = 8.0,
 ):
-    """
-    Build a mutant PDB using RosettaScripts:
-      - mutate
-      - repack
-      - minimize (chi only)
-    Writes cleaned_pdb_dir/{mut_id}.pdb
-    """
     in_pdb = os.path.join(cleaned_pdb_dir, f"{pdb_id}_{chain_id}.pdb")
     out_pdb = os.path.join(cleaned_pdb_dir, f"{mut_id}.pdb")
 
-    if os.path.exists(out_pdb) and os.path.getsize(out_pdb) > 0:
+    if _nonempty(out_pdb):
         return out_pdb
 
     workdir = os.path.join(cleaned_pdb_dir, "rosetta_work", mut_id)
@@ -275,10 +306,10 @@ def gen_mut_pdb_rosetta(
     lock = os.path.join(workdir, ".rosetta.lock")
     _acquire_lock(lock)
     try:
-        if os.path.exists(out_pdb) and os.path.getsize(out_pdb) > 0:
+        if _nonempty(out_pdb):
             return out_pdb
 
-        if not os.path.exists(in_pdb) or os.path.getsize(in_pdb) == 0:
+        if not _nonempty(in_pdb):
             raise FileNotFoundError(f"Missing WT cleaned pdb: {in_pdb}")
 
         resnum, icode = _parse_mut_pos(mut_pos)
@@ -321,7 +352,7 @@ def gen_mut_pdb_rosetta(
         newest = max(candidates, key=lambda p: os.path.getmtime(p))
         shutil.copyfile(newest, out_pdb)
 
-        if not os.path.exists(out_pdb) or os.path.getsize(out_pdb) == 0:
+        if not _nonempty(out_pdb):
             raise RuntimeError(f"Rosetta output PDB missing/empty: {out_pdb}")
 
         return out_pdb
@@ -341,22 +372,38 @@ def gen_all_pdb(
     mutator_backend="foldx",
     rosetta_scripts_path: Optional[str] = None,
     download_pdb: bool = True,
+    row_pdb_name_mode: RowPdbNameMode = "pdb",
+    row_pdb_suffix: str = "",
 ):
     """
-    If download_pdb=False, do not attempt to fetch from RCSB.
-    Instead require row_pdb/{pdb_id}.pdb to exist and be non-empty.
+    row_pdb_name_mode:
+      - "pdb":       use row_pdb/{pdb_id}{suffix}.pdb
+      - "pdb_chain": use row_pdb/{pdb_id}_{chain_id}{suffix}.pdb   (ESMFold convention)
+
+    row_pdb_suffix:
+      append to both row_pdb and cleaned_pdb WT filenames for this run, e.g. "_esmfold".
+
+    If download_pdb=False, do not fetch from RCSB; require the expected row_pdb file exists.
     """
+    rp = row_pdb_path(row_pdb_dir, pdb_id, chain_id, row_pdb_name_mode, suffix=row_pdb_suffix)
+    wp = cleaned_pdb_path(cleaned_pdb_dir, pdb_id, chain_id, suffix=row_pdb_suffix)
+
     if download_pdb:
-        download_row_pdb(pdb_id, row_pdb_dir)
+        # Download only makes sense for real PDB IDs; still allow it if requested.
+        download_row_pdb(pdb_id, row_pdb_dir, out_path=rp)
     else:
-        pdb_file = os.path.join(row_pdb_dir, pdb_id + ".pdb")
-        if not os.path.exists(pdb_file) or os.path.getsize(pdb_file) == 0:
+        if not _nonempty(rp):
             raise FileNotFoundError(
-                f"--skip-pdb-download was set, but required file is missing/empty: {pdb_file}\n"
-                f"Provide it (copy/symlink) or run without --skip-pdb-download."
+                f"--skip-pdb-download was set, but required file is missing/empty: {rp}\n"
+                f"Provide it (copy/symlink) or run without --skip-pdb-download.\n"
+                f"(hint: you set row_pdb_name_mode={row_pdb_name_mode} row_pdb_suffix={row_pdb_suffix!r})"
             )
 
-    wild_pdb = cleaned_row_pdb(pdb_id, chain_id, row_pdb_dir, cleaned_pdb_dir)
+    wild_pdb = cleaned_row_pdb(
+        pdb_id, chain_id, row_pdb_dir, cleaned_pdb_dir,
+        row_pdb_file=rp,
+        cleaned_out_path=wp,
+    )
 
     mut_id = backend_tagged_mut_id(pdb_id, chain_id, mut_pos, wild_type, mutant, mutator_backend)
 
@@ -366,7 +413,7 @@ def gen_all_pdb(
     if mutator_backend == "foldx":
         try:
             mut_pdb = gen_mut_pdb_foldx(pdb_id, chain_id, mut_pos, wild_type, mutant, cleaned_pdb_dir, foldx_path, mut_id=mut_id)
-            if os.path.exists(mut_pdb) and os.path.getsize(mut_pdb) > 0:
+            if _nonempty(mut_pdb):
                 mutated_by_structure = True
             else:
                 mut_pdb = wild_pdb
@@ -381,7 +428,7 @@ def gen_all_pdb(
                 mut_id=mut_id,
                 rosetta_scripts_path=rsp,
             )
-            if os.path.exists(mut_pdb) and os.path.getsize(mut_pdb) > 0:
+            if _nonempty(mut_pdb):
                 mutated_by_structure = True
             else:
                 mut_pdb = wild_pdb
