@@ -17,6 +17,102 @@ def _slurm_cpus(default: int) -> int:
 
 
 # -------------------------
+# Locking helpers (stale-aware)
+# -------------------------
+def _pid_is_alive(pid: int) -> bool:
+    """Best-effort: check whether a PID is alive on this node."""
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # exists but not ours
+        return True
+
+
+def _acquire_lock(lock_path: str, timeout_sec: int = 1800, poll_sec: float = 2.0, stale_sec: int = 7200):
+    """
+    Cross-process lock using atomic file create (O_EXCL), with stale lock eviction.
+
+    - timeout_sec: how long to wait before giving up
+    - stale_sec: if lock file older than this, consider it stale and remove
+    """
+    start = time.time()
+    last_notice = 0.0
+
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"{os.getpid()}\n".encode("utf-8"))
+            os.close(fd)
+            return
+        except FileExistsError:
+            # Stat lock (may disappear between checks)
+            try:
+                st = os.stat(lock_path)
+                age = time.time() - st.st_mtime
+            except FileNotFoundError:
+                continue
+
+            # Read PID from lock file
+            lock_pid = None
+            try:
+                with open(lock_path, "r") as f:
+                    first = f.read().strip().splitlines()[0]
+                    lock_pid = int(first)
+            except Exception:
+                lock_pid = None
+
+            pid_alive = _pid_is_alive(lock_pid)
+
+            # If process is definitely gone, evict stale lock
+            if (lock_pid is not None) and (not pid_alive) and age >= 10:
+                try:
+                    os.remove(lock_path)
+                    continue
+                except OSError:
+                    pass
+
+            # Age-based eviction backstop
+            if age > stale_sec:
+                try:
+                    os.remove(lock_path)
+                    continue
+                except OSError:
+                    pass
+
+            now = time.time()
+            if now - start > timeout_sec:
+                raise TimeoutError(
+                    f"Timed out waiting for lock: {lock_path} "
+                    f"(age={age:.0f}s pid={lock_pid} alive={pid_alive})"
+                )
+
+            # (optional) emit occasional note; keep disabled to reduce log spam
+            if now - last_notice > 300:
+                last_notice = now
+
+            time.sleep(poll_sec)
+
+
+def _release_lock(lock_path: str):
+    try:
+        os.remove(lock_path)
+    except FileNotFoundError:
+        pass
+
+
+def _nonempty(path: str) -> bool:
+    try:
+        return os.path.exists(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
+# -------------------------
 # PSI-BLAST
 # -------------------------
 def use_psiblast(fasta_file, rawmsa_dir, psi_path, uniref90_path, num_threads: int = 16):
@@ -25,46 +121,88 @@ def use_psiblast(fasta_file, rawmsa_dir, psi_path, uniref90_path, num_threads: i
       - {rawmsa_dir}/{fasta_name}.rawmsa (pairwise output)
       - {rawmsa_dir}/{fasta_name}.pssm   (ASCII PSSM)
 
-    Raises a RuntimeError with stdout/stderr if BLAST fails.
+    Safe for SLURM arrays: uses a per-fasta lock to avoid file collisions and partial files.
+    Writes to temp files and os.replace() atomically.
     """
     fasta_name = os.path.basename(fasta_file).split('.')[0]
     rawmsa_file = os.path.join(rawmsa_dir, fasta_name + '.rawmsa')
     pssm_file = os.path.join(rawmsa_dir, fasta_name + '.pssm')
 
-    if os.path.exists(pssm_file) and os.path.exists(rawmsa_file):
+    # Fast path
+    if _nonempty(pssm_file) and _nonempty(rawmsa_file):
         return rawmsa_file, pssm_file
 
     os.makedirs(rawmsa_dir, exist_ok=True)
 
-    threads = _slurm_cpus(num_threads)
-
-    cmd = [
-        psi_path,
-        "-query", fasta_file,
-        "-db", uniref90_path,
-        "-out", rawmsa_file,
-        "-evalue", "0.001",
-        "-matrix", "BLOSUM62",
-        "-num_iterations", "3",
-        "-num_threads", str(threads),
-        "-out_ascii_pssm", pssm_file,
-    ]
-
+    lock_path = os.path.join(rawmsa_dir, f".{fasta_name}.psiblast.lock")
+    _acquire_lock(lock_path)
     try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            f"psiblast failed for {fasta_file} with db={uniref90_path}\n"
-            f"Command: {' '.join(cmd)}\n"
-            f"stdout:\n{e.stdout}\n\nstderr:\n{e.stderr}\n"
-        ) from e
+        # Re-check after waiting
+        if _nonempty(pssm_file) and _nonempty(rawmsa_file):
+            return rawmsa_file, pssm_file
 
-    if not os.path.exists(rawmsa_file):
-        raise FileNotFoundError(f"psiblast did not create rawmsa file: {rawmsa_file}")
-    if not os.path.exists(pssm_file):
-        raise FileNotFoundError(f"psiblast did not create pssm file: {pssm_file}")
+        # Remove stale/partial outputs (common after preemption)
+        for p in (rawmsa_file, pssm_file):
+            if os.path.exists(p) and os.path.getsize(p) == 0:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
 
-    return rawmsa_file, pssm_file
+        # Temp outputs (same dir so os.replace is atomic)
+        tmp_rawmsa = rawmsa_file + f".tmp_{os.getpid()}"
+        tmp_pssm = pssm_file + f".tmp_{os.getpid()}"
+
+        # Clean any previous temp files for this pid (unlikely but harmless)
+        for p in (tmp_rawmsa, tmp_pssm):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+
+        threads = _slurm_cpus(num_threads)
+
+        cmd = [
+            psi_path,
+            "-query", fasta_file,
+            "-db", uniref90_path,
+            "-out", tmp_rawmsa,
+            "-evalue", "0.001",
+            "-matrix", "BLOSUM62",
+            "-num_iterations", "3",
+            "-num_threads", str(threads),
+            "-out_ascii_pssm", tmp_pssm,
+        ]
+
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        except subprocess.CalledProcessError as e:
+            # Remove temp outputs on failure to avoid confusing future runs
+            for p in (tmp_rawmsa, tmp_pssm):
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except OSError:
+                    pass
+            raise RuntimeError(
+                f"psiblast failed for {fasta_file} with db={uniref90_path}\n"
+                f"Command: {' '.join(cmd)}\n"
+                f"stdout:\n{e.stdout}\n\nstderr:\n{e.stderr}\n"
+            ) from e
+
+        if not _nonempty(tmp_rawmsa):
+            raise FileNotFoundError(f"psiblast did not create rawmsa file: {tmp_rawmsa}")
+        if not _nonempty(tmp_pssm):
+            raise FileNotFoundError(f"psiblast did not create pssm file: {tmp_pssm}")
+
+        # Atomic finalize
+        os.replace(tmp_rawmsa, rawmsa_file)
+        os.replace(tmp_pssm, pssm_file)
+
+        return rawmsa_file, pssm_file
+    finally:
+        _release_lock(lock_path)
 
 
 # -------------------------
@@ -162,7 +300,7 @@ def format_rawmsa_via_blastdbcmd(
     # Try direct header IDs first
     fasta_text = _blastdbcmd_fetch_fasta(hit_ids, blastdbcmd_path, uniref90_path)
 
-    # Fallback: if headers look like "..._<ID>" use split('_')[1]
+    # Fallback: if headers look like "..._" use split('_')[1]
     if not fasta_text.strip():
         fallback = []
         for h in hit_ids:
@@ -249,95 +387,6 @@ def format_clustal(clustal_output_file, formatted_output_file):
 
     with open(formatted_output_file, "w") as f:
         f.write(outtxt)
-
-
-# -------------------------
-# Locking helpers (stale-aware)
-# -------------------------
-def _pid_is_alive(pid: int) -> bool:
-    """Best-effort: check whether a PID is alive on this node."""
-    if pid is None or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # exists but not ours
-        return True
-
-
-def _acquire_lock(lock_path: str, timeout_sec: int = 1800, poll_sec: float = 2.0, stale_sec: int = 7200):
-    """
-    Cross-process lock using atomic file create (O_EXCL), with stale lock eviction.
-
-    - timeout_sec: how long to wait before giving up
-    - stale_sec: if lock file older than this, consider it stale and remove
-    """
-    start = time.time()
-    last_notice = 0.0
-
-    while True:
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, f"{os.getpid()}\n".encode("utf-8"))
-            os.close(fd)
-            return
-        except FileExistsError:
-            # Stat lock (may disappear between checks)
-            try:
-                st = os.stat(lock_path)
-                age = time.time() - st.st_mtime
-            except FileNotFoundError:
-                continue
-
-            # Read PID from lock file
-            lock_pid = None
-            try:
-                with open(lock_path, "r") as f:
-                    first = f.read().strip().splitlines()[0]
-                    lock_pid = int(first)
-            except Exception:
-                lock_pid = None
-
-            pid_alive = _pid_is_alive(lock_pid)
-
-            # If process is definitely gone, evict stale lock
-            if (lock_pid is not None) and (not pid_alive) and age >= 10:
-                try:
-                    os.remove(lock_path)
-                    continue
-                except OSError:
-                    pass
-
-            # Age-based eviction backstop
-            if age > stale_sec:
-                try:
-                    os.remove(lock_path)
-                    continue
-                except OSError:
-                    pass
-
-            now = time.time()
-            if now - start > timeout_sec:
-                raise TimeoutError(
-                    f"Timed out waiting for lock: {lock_path} "
-                    f"(age={age:.0f}s pid={lock_pid} alive={pid_alive})"
-                )
-
-            # (optional) emit occasional note; keep disabled to reduce log spam
-            if now - last_notice > 300:
-                last_notice = now
-
-            time.sleep(poll_sec)
-
-
-def _release_lock(lock_path: str):
-    try:
-        os.remove(lock_path)
-    except FileNotFoundError:
-        pass
 
 
 def gen_msa(prot_id, prot_seq, rawmsa_file, output_dir, clustalo_path, blastdbcmd_path, uniref90_path):
@@ -487,7 +536,6 @@ def process_hhm(path):
                 feature[axis_x][axis_y] = (9999 if j == "*" else float(j)) / 10000.0
                 axis_y += 1
             axis_x += 1
-        # feature = (feature - np.min(feature)) / (np.max(feature) - np.min(feature))
         den = (np.max(feature) - np.min(feature))
         feature = (feature - np.min(feature)) / (den + 1e-8)
         return feature

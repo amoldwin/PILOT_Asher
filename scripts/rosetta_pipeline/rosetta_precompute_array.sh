@@ -15,7 +15,7 @@
 # IMPORTANT:
 # Do NOT hardcode --array here; set it at submit-time:
 #   sbatch --array=0-999 scripts/rosetta_precompute_array.sh MUT_LIST FEATURE_DIR [SASA_BACKEND]
-##sbatch --array=0-4916 scripts/rosetta_pipeline/rosetta_precompute_array.sh dataset/mutation_list_dTm.txt /scratch/amoldwin/datasets/PILOT_dTm/ freesasa
+##sbatch --array=0-4916 scripts/rosetta_pipeline/rosetta_precompute_array.sh dataset/mutation_list_dTm.txt /scratch/amoldwin/datasets/PILOT_dTm/ freesasa   --row-pdb-name-mode pdb_chain --row-pdb-suffix _esmfold
 set -euo pipefail
 
 MUT_LIST=${1:?Usage: sbatch --array=0-N scripts/rosetta_precompute_array.sh MUT_LIST FEATURE_DIR [SASA_BACKEND]}
