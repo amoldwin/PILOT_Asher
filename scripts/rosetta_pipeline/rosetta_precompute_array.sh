@@ -15,7 +15,7 @@
 # IMPORTANT:
 # Do NOT hardcode --array here; set it at submit-time:
 #   sbatch --array=0-999 scripts/rosetta_precompute_array.sh MUT_LIST FEATURE_DIR [SASA_BACKEND]
-
+##sbatch --array=0-4916 scripts/rosetta_pipeline/rosetta_precompute_array.sh dataset/mutation_list_dTm.txt /scratch/amoldwin/datasets/PILOT_dTm/ freesasa
 set -euo pipefail
 
 MUT_LIST=${1:?Usage: sbatch --array=0-N scripts/rosetta_precompute_array.sh MUT_LIST FEATURE_DIR [SASA_BACKEND]}
@@ -35,7 +35,7 @@ module load rosetta/3.13
 export PATH="/projects/ashehu/amoldwin/software/msms/bin:$PATH"
 
 # HHblits DB (adjust to your actual path)
-export HHBLITS_DB=/scratch/amoldwin/datasets/Uniref30
+export HHBLITS_DB=/scratch/amoldwin/datasets/Uniref30/UniRef30_2021_03
 
 # --- select a single mutation line (robust against blanks/comments) ---
 TASK_ID=${SLURM_ARRAY_TASK_ID}

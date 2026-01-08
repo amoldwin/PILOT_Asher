@@ -57,27 +57,29 @@ seq_dict = gen_seq_dict()
 
 
 def get_pred_result(pdb_id, chain_id, mut_pos, wild_type, mutant, feature_dir, mutator_backend: str):
-    mut_info = [mut_pos, wild_type, mutant]
-    base_mut_id = pdb_id + '_' + chain_id + '_' + mut_info[1] + mut_info[0] + mut_info[2]
-    mut_id = base_mut_id + '__' + mutator_backend
+    """
+    Prediction inputs are structure-dependent and keyed by the backend-tagged struct_id.
+    """
+    seq_id = f"{pdb_id}_{chain_id}_{wild_type}{mut_pos}{mutant}"
+    struct_id = f"{seq_id}__{mutator_backend}"
 
-    res_node_wt_path = f'{feature_dir}/{mut_id}_RN_wt.npy'
-    res_edge_wt_path = f'{feature_dir}/{mut_id}_RE_wt.npy'
-    res_edge_index_wt_path = f'{feature_dir}/{mut_id}_REI_wt.npy'
-    atom_node_wt_path = f'{feature_dir}/{mut_id}_AN_wt.npy'
-    atom_edge_wt_path = f'{feature_dir}/{mut_id}_AE_wt.npy'
-    atom_edge_index_wt_path = f'{feature_dir}/{mut_id}_AEI_wt.npy'
-    atom2res_index_wt_path = f'{feature_dir}/{mut_id}_I_wt.npy'
-    extra_feat_wt_path = f'{feature_dir}/{mut_id}_EF_wt.npy'
+    res_node_wt_path = f'{feature_dir}/{struct_id}_RN_wt.npy'
+    res_edge_wt_path = f'{feature_dir}/{struct_id}_RE_wt.npy'
+    res_edge_index_wt_path = f'{feature_dir}/{struct_id}_REI_wt.npy'
+    atom_node_wt_path = f'{feature_dir}/{struct_id}_AN_wt.npy'
+    atom_edge_wt_path = f'{feature_dir}/{struct_id}_AE_wt.npy'
+    atom_edge_index_wt_path = f'{feature_dir}/{struct_id}_AEI_wt.npy'
+    atom2res_index_wt_path = f'{feature_dir}/{struct_id}_I_wt.npy'
+    extra_feat_wt_path = f'{feature_dir}/{struct_id}_EF_wt.npy'
 
-    res_node_mt_path = f'{feature_dir}/{mut_id}_RN_mt.npy'
-    res_edge_mt_path = f'{feature_dir}/{mut_id}_RE_mt.npy'
-    res_edge_index_mt_path = f'{feature_dir}/{mut_id}_REI_mt.npy'
-    atom_node_mt_path = f'{feature_dir}/{mut_id}_AN_mt.npy'
-    atom_edge_mt_path = f'{feature_dir}/{mut_id}_AE_mt.npy'
-    atoms_edge_index_mt_path = f'{feature_dir}/{mut_id}_AEI_mt.npy'
-    atom2res_index_mt_path = f'{feature_dir}/{mut_id}_I_mt.npy'
-    extra_feat_mt_path = f'{feature_dir}/{mut_id}_EF_mt.npy'
+    res_node_mt_path = f'{feature_dir}/{struct_id}_RN_mt.npy'
+    res_edge_mt_path = f'{feature_dir}/{struct_id}_RE_mt.npy'
+    res_edge_index_mt_path = f'{feature_dir}/{struct_id}_REI_mt.npy'
+    atom_node_mt_path = f'{feature_dir}/{struct_id}_AN_mt.npy'
+    atom_edge_mt_path = f'{feature_dir}/{struct_id}_AE_mt.npy'
+    atoms_edge_index_mt_path = f'{feature_dir}/{struct_id}_AEI_mt.npy'
+    atom2res_index_mt_path = f'{feature_dir}/{struct_id}_I_mt.npy'
+    extra_feat_mt_path = f'{feature_dir}/{struct_id}_EF_mt.npy'
 
     res_node_wt = np.load(res_node_wt_path).astype(float)
     res_node_wt[:, :-1] = Standardization(res_node_wt[:, :-1])
@@ -142,7 +144,7 @@ def main():
 
     parser.add_argument('--mutator-backend', dest='mutator_backend', type=str, default='foldx',
                         choices=['foldx', 'proxy', 'rosetta'],
-                        help='Which backend was used to generate the input/*.npy files (affects mut_id naming).')
+                        help='Which backend was used to generate the input/*.npy files (affects struct_id naming).')
 
     args = parser.parse_args()
     infile = args.mutant_list
@@ -157,14 +159,15 @@ def main():
             mut_pos = mut_info[2]
             wild_type = mut_info[3][0]
             mutant = mut_info[3][-1]
-            base_mut_id = pdb_id + '_' + chain_id + '_' + wild_type + mut_pos + mutant
-            mut_id = base_mut_id + '__' + args.mutator_backend
+
+            seq_id = f"{pdb_id}_{chain_id}_{wild_type}{mut_pos}{mutant}"
+            struct_id = f"{seq_id}__{args.mutator_backend}"
 
             input_dir = f'{feature_dir}/input'
             pred_ddG = get_pred_result(pdb_id, chain_id, mut_pos, wild_type, mutant, input_dir, args.mutator_backend)
             f_w.write(f'{pdb_id}\t{chain_id}\t{mut_pos}\t{wild_type}/{mutant}\t{pred_ddG}\n')
             print('======================================')
-            print(f'The result of {mut_id}: {pred_ddG}.')
+            print(f'The result of {struct_id}: {pred_ddG}.')
             print('======================================')
 
 
