@@ -60,4 +60,5 @@ python gen_features.py \
   -s precompute \
   --sasa-backend "${SASA_BACKEND}" \
   --mutator-backend rosetta \
-  --rosetta-scripts-path rosetta_scripts.static.linuxgccrelease
+  --rosetta-scripts-path rosetta_scripts.static.linuxgccrelease \
+  --skip-pdb-download

@@ -171,6 +171,13 @@ def _write_rosettascripts_xml(xml_path: str, chain_id: str, resnum: int, icode: 
     Uses PDB numbering (chain+resnum+icode).
     """
     icode_str = icode if icode else ""
+    res_spec = f"{resnum}{icode_str}"
+
+    xml = f"""
+    Minimal RosettaScripts: mutate residue, repack neighborhood, minimize.
+    Uses PDB numbering (chain+resnum+icode).
+    """
+    icode_str = icode if icode else ""
     # Rosetta PDB residue selector supports insertion codes via "resnum+icode" in some builds;
     # safest is to use explicit PDB numbering in a selector string.
     # We'll use ResidueIndexSelector with "resnum+icode" and chain restriction via ChainSelector intersection.
@@ -228,7 +235,6 @@ def _parse_mut_pos(mut_pos: str):
     s = mut_pos.strip()
     if not s:
         raise ValueError("Empty mut_pos")
-    # split numeric prefix
     i = 0
     while i < len(s) and s[i].isdigit():
         i += 1
@@ -280,15 +286,13 @@ def gen_mut_pdb_rosetta(
         xml_path = os.path.join(workdir, "mutate_repack_minimize.xml")
         _write_rosettascripts_xml(xml_path, chain_id=chain_id, resnum=resnum, icode=icode, mutant_aa=mutant, pack_radius=pack_radius)
 
-        # Output handling: Rosetta writes into -out:path:all, usually as {input}_0001.pdb (or similar).
-        # We'll capture any .pdb written and copy it to out_pdb.
         cmd = [
             rosetta_scripts_path,
             "-s", in_pdb,
             "-parser:protocol", xml_path,
             "-out:path:all", workdir,
             "-overwrite",
-            "-mute", "all",  # reduce log spam; errors still bubble
+            "-mute", "all",
         ]
 
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -302,7 +306,6 @@ def gen_mut_pdb_rosetta(
         if proc.returncode != 0:
             raise RuntimeError(f"RosettaScripts failed (exit={proc.returncode}). See {log_path}")
 
-        # Find produced pdb (newest .pdb in workdir excluding the input)
         candidates = []
         for fn in os.listdir(workdir):
             if not fn.lower().endswith(".pdb"):
@@ -337,8 +340,22 @@ def gen_all_pdb(
     foldx_path,
     mutator_backend="foldx",
     rosetta_scripts_path: Optional[str] = None,
+    download_pdb: bool = True,
 ):
-    download_row_pdb(pdb_id, row_pdb_dir)
+    """
+    If download_pdb=False, do not attempt to fetch from RCSB.
+    Instead require row_pdb/{pdb_id}.pdb to exist and be non-empty.
+    """
+    if download_pdb:
+        download_row_pdb(pdb_id, row_pdb_dir)
+    else:
+        pdb_file = os.path.join(row_pdb_dir, pdb_id + ".pdb")
+        if not os.path.exists(pdb_file) or os.path.getsize(pdb_file) == 0:
+            raise FileNotFoundError(
+                f"--skip-pdb-download was set, but required file is missing/empty: {pdb_file}\n"
+                f"Provide it (copy/symlink) or run without --skip-pdb-download."
+            )
+
     wild_pdb = cleaned_row_pdb(pdb_id, chain_id, row_pdb_dir, cleaned_pdb_dir)
 
     mut_id = backend_tagged_mut_id(pdb_id, chain_id, mut_pos, wild_type, mutant, mutator_backend)
@@ -372,7 +389,6 @@ def gen_all_pdb(
             mut_pdb = wild_pdb
 
     else:
-        # proxy (or any unknown): no structural mutation
         mut_pdb = wild_pdb
 
     return wild_pdb, mut_pdb, mutated_by_structure, mut_id

@@ -97,8 +97,18 @@ def _ensure_dirs(dir):
     return row_pdb_dir, cleaned_pdb_dir, fasta_dir, pssm_dir, msa_dir, hhm_dir, sasa_dir, esm_dir, input_dir
 
 
-def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
-                 sasa_backend='naccess', step='all', mutator_backend='foldx'):
+def gen_features(
+    pdb_id,
+    chain_id,
+    mut_pos,
+    wild_type,
+    mutant,
+    dir,
+    sasa_backend='naccess',
+    step='all',
+    mutator_backend='foldx',
+    skip_pdb_download: bool = False,
+):
     """
     step: one of
       - all
@@ -116,7 +126,7 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
     # Sequence ID for mutant (backend-agnostic)
     seq_id = pdb_id + '_' + chain_id + '_' + wild_type + mut_pos + mutant
 
-    # Structure ID for mutant (backend-tagged) -- used for mutant PDB, SASA, and final npy inputs
+    # Structure ID for mutant (backend-tagged)
     struct_id = seq_id + '__' + mutator_backend
 
     print('--------------------------------------')
@@ -130,26 +140,21 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
         row_pdb_dir, cleaned_pdb_dir, foldx_path,
         mutator_backend=mutator_backend,
         rosetta_scripts_path=rosetta_scripts_path,
+        download_pdb=(not skip_pdb_download),
     )
-    # mut_id_from_pdb is backend-tagged mutant structure id
     struct_id = mut_id_from_pdb
 
-    # FASTA:
-    # - WT uses pdb_chain (as before)
-    # - Mutant FASTA should be backend-agnostic (seq_id), because it's identical regardless of foldx/rosetta/proxy
+    # FASTA
     wild_fasta, mut_fasta, wild_seq, mut_seq, pdb_positions, pdbpos2uniprotpos_dict = gen_all_fasta(
         pdb_id, chain_id, mut_pos, wild_type, mutant,
         cleaned_pdb_dir, fasta_dir,
         mutated_by_structure=mutated_by_structure,
-        mut_id=seq_id,   # <-- change: mutant FASTA/PSSM/MSA/HHM/ESM keyed by seq_id
+        mut_id=seq_id,
     )
 
     if step == 'structures':
         return
 
-    # -------------------------
-    # Precompute split stages
-    # -------------------------
     do_sasa = step in ['all', 'precompute', 'precompute_psiblast_msa']
     do_psiblast = step in ['all', 'precompute', 'precompute_psiblast_msa']
     do_msa = step in ['all', 'precompute', 'precompute_psiblast_msa']
@@ -157,9 +162,7 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
 
     if step in ['all', 'precompute', 'precompute_psiblast_msa', 'precompute_hhblits']:
 
-        # SASA:
-        # WT: pdb_chain
-        # MUT: struct_id (structure-dependent)
+        # SASA: WT uses pdb_chain; mutant SASA uses struct_id (structure-dependent)
         if do_sasa:
             if sasa_backend.lower() == 'freesasa':
                 print('Using FreeSASA ...')
@@ -192,7 +195,7 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
             wild_frawmsa, wild_fpssm = use_psiblast(wild_fasta, pssm_dir, psi_path, uniref90_path)
             mut_frawmsa, mut_fpssm = use_psiblast(mut_fasta, pssm_dir, psi_path, uniref90_path)
 
-        # MSA (blastdbcmd-based) (sequence-derived -> seq_id)
+        # MSA (sequence-derived -> seq_id)
         if do_msa:
             print('Generating MSA files ...')
             wild_frawmsa = os.path.join(pssm_dir, f'{pdb_chain}.rawmsa')
@@ -223,7 +226,6 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
     wild_rsa = os.path.join(sasa_dir, f'{pdb_id}_{chain_id}.rsa')
     wild_asa = os.path.join(sasa_dir, f'{pdb_id}_{chain_id}.asa')
 
-    # MUT SASA is structure-dependent -> struct_id
     mut_rsa = os.path.join(sasa_dir, f'{struct_id}.rsa')
     mut_asa = os.path.join(sasa_dir, f'{struct_id}.asa')
 
@@ -272,7 +274,7 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
     wild_hhm = process_hhm(wild_fhhm)
     mut_hhm = process_hhm(mut_fhhm)
 
-    # MSA frequency + conservation (sequence-derived -> seq_id)
+    # MSA (sequence-derived -> seq_id)
     wild_fmsa = os.path.join(msa_dir, f'{pdb_chain}.msa')
     mut_fmsa = os.path.join(msa_dir, f'{seq_id}.msa')
     if not os.path.exists(wild_fmsa) or not os.path.exists(mut_fmsa):
@@ -346,7 +348,6 @@ def gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, dir,
     wild_atom_node_feat = generate_node_feature(wild_atom_feat_dict, wild_atom_index_pos, 5)
     mut_atom_node_feat = generate_node_feature(mut_atom_feat_dict, mut_atom_index_pos, 5)
 
-    # ESM2 loaded from backend-agnostic seq_id/pdb_chain .pt files
     wild_mb_data = get_esm2(pdb_chain, wild_res_index_pos_dict, pdbpos2uniprotpos_dict, esm_dir)
     mut_mb_data = get_esm2(seq_id, mut_res_index_pos_dict, pdbpos2uniprotpos_dict, esm_dir)
 
@@ -411,6 +412,10 @@ def main():
                         default=(shutil.which('rosetta_scripts.static.linuxgccrelease') or 'rosetta_scripts.static.linuxgccrelease'),
                         help='Path to rosetta_scripts.static.linuxgccrelease (or mpi binary) if not on PATH.')
 
+    # NEW: disable PDB download
+    parser.add_argument('--skip-pdb-download', dest='skip_pdb_download', action='store_true',
+                        help='Do not download PDBs from RCSB. Require FEATURE_DIR/row_pdb/{pdb_id}.pdb to already exist.')
+
     args = parser.parse_args()
 
     global freesasa_path
@@ -434,8 +439,14 @@ def main():
                                  f'expected like H/S, got {aa_field!r}')
             wild_type = aa_field[0]
             mutant = aa_field[-1]
-            gen_features(pdb_id, chain_id, mut_pos, wild_type, mutant, args.dir,
-                         sasa_backend=args.sasa_backend, step=args.step, mutator_backend=args.mutator_backend)
+            gen_features(
+                pdb_id, chain_id, mut_pos, wild_type, mutant, args.dir,
+                sasa_backend=args.sasa_backend,
+                step=args.step,
+                mutator_backend=args.mutator_backend,
+                skip_pdb_download=args.skip_pdb_download,
+            )
+
 
 if __name__ == "__main__":
     main()
