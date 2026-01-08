@@ -27,21 +27,12 @@ NON_STANDARD_SUBSTITUTIONS = {
 
 
 def _normalize_suffix(suffix: str) -> str:
-    """
-    Normalize suffix so:
-      - "" stays ""
-      - "esmfold" -> "_esmfold"
-      - "_esmfold" stays "_esmfold"
-    """
     if not suffix:
         return ""
     return suffix if suffix.startswith("_") else "_" + suffix
 
 
 def _get_single_chain_id_from_pdb(pdbfile: str) -> str | None:
-    """
-    Return the only chain id present in model 0 if there is exactly one chain; else None.
-    """
     parser = PDBParser(QUIET=True)
     struct = parser.get_structure('PDB', pdbfile)
     model = struct[0]
@@ -52,13 +43,6 @@ def _get_single_chain_id_from_pdb(pdbfile: str) -> str | None:
 
 
 def read_pdb(pdbfile, chain_id):
-    """
-    Read sequence and residue positions from a PDB chain.
-
-    For ESMFold-generated single-chain PDBs, users often supply an arbitrary chain ID
-    in the mutation list. If the requested chain is missing but the PDB has exactly one
-    chain, we fall back to that chain automatically.
-    """
     parser = PDBParser(QUIET=True)
     struct = parser.get_structure('PDB', pdbfile)
     model = struct[0]
@@ -104,16 +88,6 @@ def gen_all_fasta(
     cleaned_pdb_suffix: str = "",
     fasta_suffix: str = "",
 ):
-    """
-    If mutated_by_structure is False, construct the mutant sequence by editing the wild sequence
-    at mut_pos instead of reading a mutant PDB.
-
-    - cleaned_pdb_suffix controls which WT cleaned PDB is read:
-        cleaned_pdb/{pdb_id}_{chain_id}{suffix}.pdb   (e.g. _esmfold)
-    - fasta_suffix controls naming of WT/mut fasta outputs (to avoid collisions across runs):
-        fasta/{pdb_id}_{chain_id}{suffix}.fasta
-        fasta/{mut_id}{suffix}.fasta
-    """
     pdbpos2uniprotpos_dict = {}
 
     if mut_id is None:

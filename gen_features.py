@@ -103,8 +103,23 @@ def gen_features(
     row_pdb_name_mode: str = "pdb",
     row_pdb_suffix: str = "",
 ):
+    """
+    step: one of
+      - all
+      - structures
+      - precompute
+      - precompute_psiblast_msa   (psiblast + msa + sasa, no hhblits)
+      - precompute_hhblits        (hhblits only)
+      - esm2
+      - assemble
+
+    NOTE on suffixing (mode B):
+      If row_pdb_suffix is set (e.g. "_esmfold"), then this run will also suffix FASTA/pssm/rawmsa/msa/hhm/esm
+      by deriving all sequence-derived IDs from FASTA basenames.
+    """
     row_pdb_dir, cleaned_pdb_dir, fasta_dir, pssm_dir, msa_dir, hhm_dir, sasa_dir, esm_dir, input_dir = _ensure_dirs(dir)
 
+    # Base (unsuffixed) ids used only for printing / struct_id naming
     pdb_chain = pdb_id + '_' + chain_id
     seq_id = pdb_id + '_' + chain_id + '_' + wild_type + mut_pos + mutant
     struct_id = seq_id + '__' + mutator_backend
@@ -125,7 +140,7 @@ def gen_features(
     )
     struct_id = mut_id_from_pdb
 
-    # IMPORTANT: make FASTA generation read the same (possibly suffixed) cleaned WT PDB
+    # IMPORTANT (suffix mode B): FASTA naming matches row_pdb_suffix, and we derive all downstream IDs from FASTA basenames.
     wild_fasta, mut_fasta, wild_seq, mut_seq, pdb_positions, pdbpos2uniprotpos_dict = gen_all_fasta(
         pdb_id, chain_id, mut_pos, wild_type, mutant,
         cleaned_pdb_dir, fasta_dir,
@@ -135,6 +150,10 @@ def gen_features(
         fasta_suffix=row_pdb_suffix,
     )
 
+    # These become the canonical IDs for sequence-derived features (pssm/rawmsa/msa/hhm/esm)
+    wild_prot_id = os.path.basename(wild_fasta).split('.')[0]
+    mut_prot_id = os.path.basename(mut_fasta).split('.')[0]
+
     if step == 'structures':
         return
 
@@ -143,8 +162,12 @@ def gen_features(
     do_msa = step in ['all', 'precompute', 'precompute_psiblast_msa']
     do_hhblits = step in ['all', 'precompute', 'precompute_hhblits']
 
+    # -------------------------
+    # PRECOMPUTE
+    # -------------------------
     if step in ['all', 'precompute', 'precompute_psiblast_msa', 'precompute_hhblits']:
 
+        # SASA files are keyed by PDB basename (WT uses wild_pdb basename; mutant uses struct_id naming in gen_features)
         if do_sasa:
             if sasa_backend.lower() == 'freesasa':
                 print('Using FreeSASA ...')
@@ -171,42 +194,276 @@ def gen_features(
                     if not _nonempty(mut_fasa):
                         shutil.copyfile(wild_fasa, mut_fasa)
 
+        # PSI-BLAST: outputs keyed by FASTA basename => rawmsa_pssm/{prot_id}.(rawmsa|pssm)
         if do_psiblast:
             print('Using psiblast ...')
             wild_frawmsa, wild_fpssm = use_psiblast(wild_fasta, pssm_dir, psi_path, uniref90_path)
             mut_frawmsa, mut_fpssm = use_psiblast(mut_fasta, pssm_dir, psi_path, uniref90_path)
 
+        # MSA: outputs keyed by prot_id => msa/{prot_id}.msa
         if do_msa:
             print('Generating MSA files ...')
-            wild_frawmsa = os.path.join(pssm_dir, f'{os.path.basename(wild_fasta).split(".")[0]}.rawmsa')
-            mut_frawmsa = os.path.join(pssm_dir, f'{os.path.basename(mut_fasta).split(".")[0]}.rawmsa')
-            # prot_id for msa/hhm/esm should match fasta_name to stay consistent
-            wild_prot_id = os.path.basename(wild_fasta).split('.')[0]
-            mut_prot_id = os.path.basename(mut_fasta).split('.')[0]
+            wild_frawmsa = os.path.join(pssm_dir, f'{wild_prot_id}.rawmsa')
+            mut_frawmsa = os.path.join(pssm_dir, f'{mut_prot_id}.rawmsa')
             _ = gen_msa(wild_prot_id, wild_seq, wild_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
             _ = gen_msa(mut_prot_id, mut_seq, mut_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
 
+        # HHblits: outputs keyed by prot_id => hhm/{prot_id}.hhm
         if do_hhblits:
             print('Using hhblits ...')
-            wild_prot_id = os.path.basename(wild_fasta).split('.')[0]
-            mut_prot_id = os.path.basename(mut_fasta).split('.')[0]
             _ = use_hhblits(wild_prot_id, wild_fasta, hhblits_path, uniRef30_path, hhm_dir)
             _ = use_hhblits(mut_prot_id, mut_fasta, hhblits_path, uniRef30_path, hhm_dir)
 
         if step in ['precompute', 'precompute_psiblast_msa', 'precompute_hhblits']:
             return
 
+    # -------------------------
+    # ESM2
+    # -------------------------
     if step in ['all', 'esm2']:
         print('Using esm2 ...')
-        wild_prot_id = os.path.basename(wild_fasta).split('.')[0]
-        mut_prot_id = os.path.basename(mut_fasta).split('.')[0]
         use_esm2(wild_fasta, wild_prot_id, esm_dir)
         use_esm2(mut_fasta, mut_prot_id, esm_dir)
         if step == 'esm2':
             return
 
-    # assemble section unchanged below ...
-    # (rest of file identical to your attached version)
+    # -------------------------
+    # ASSEMBLE
+    # -------------------------
     print('Assembling features ...')
-    # NOTE: omitted here for brevity in this snippet; keep your existing assemble code block.
-    raise NotImplementedError("Apply the same prot_id naming changes in assemble, or keep current if you don't suffix fasta outputs.")
+
+    # SASA outputs are based on pdb basenames from use_freesasa/use_naccess
+    wild_pdb_name = os.path.basename(wild_pdb).split('.')[0]
+    wild_rsa = os.path.join(sasa_dir, f'{wild_pdb_name}.rsa')
+    wild_asa = os.path.join(sasa_dir, f'{wild_pdb_name}.asa')
+
+    mut_rsa = os.path.join(sasa_dir, f'{struct_id}.rsa')
+    mut_asa = os.path.join(sasa_dir, f'{struct_id}.asa')
+
+    def _ensure_sasa(pdb_file, rsa_path, asa_path):
+        if not (_nonempty(rsa_path) and _nonempty(asa_path)):
+            if sasa_backend.lower() == 'freesasa':
+                use_freesasa(pdb_file, sasa_dir, freesasa_path)
+            else:
+                use_naccess(pdb_file, sasa_dir, naccess_path)
+
+    _ensure_sasa(wild_pdb, wild_rsa, wild_asa)
+    if mutated_by_structure:
+        _ensure_sasa(mut_pdb, mut_rsa, mut_asa)
+    else:
+        if not _nonempty(mut_rsa):
+            shutil.copyfile(wild_rsa, mut_rsa)
+        if not _nonempty(mut_asa):
+            shutil.copyfile(wild_asa, mut_asa)
+
+    wild_rsasa, wild_asasa = calc_SASA(wild_rsa, wild_asa)
+    mut_rsasa, mut_asasa = calc_SASA(mut_rsa, mut_asa)
+
+    wild_ss = calc_ss(wild_pdb, dssp_path)
+    mut_ss = calc_ss(mut_pdb if mutated_by_structure else wild_pdb, dssp_path)
+
+    wild_depth = calc_depth(wild_pdb, chain_id)
+    mut_depth = calc_depth(mut_pdb if mutated_by_structure else wild_pdb, chain_id)
+
+    # PSSM/HHM/MSA are keyed by FASTA basenames
+    wild_fpssm = os.path.join(pssm_dir, f'{wild_prot_id}.pssm')
+    mut_fpssm = os.path.join(pssm_dir, f'{mut_prot_id}.pssm')
+    if not os.path.exists(wild_fpssm) or not os.path.exists(mut_fpssm):
+        print('PSSM missing; running psiblast ...')
+        wild_frawmsa, wild_fpssm = use_psiblast(wild_fasta, pssm_dir, psi_path, uniref90_path)
+        mut_frawmsa, mut_fpssm = use_psiblast(mut_fasta, pssm_dir, psi_path, uniref90_path)
+    wild_pssm, wild_res_dict = get_pssm(wild_fpssm)
+    mut_pssm, mut_res_dict = get_pssm(mut_fpssm)
+
+    wild_fhhm = os.path.join(hhm_dir, f'{wild_prot_id}.hhm')
+    mut_fhhm = os.path.join(hhm_dir, f'{mut_prot_id}.hhm')
+    if not os.path.exists(wild_fhhm) or not os.path.exists(mut_fhhm):
+        print('HHM missing; running hhblits ...')
+        wild_fhhm = use_hhblits(wild_prot_id, wild_fasta, hhblits_path, uniRef30_path, hhm_dir)
+        mut_fhhm = use_hhblits(mut_prot_id, mut_fasta, hhblits_path, uniRef30_path, hhm_dir)
+    wild_hhm = process_hhm(wild_fhhm)
+    mut_hhm = process_hhm(mut_fhhm)
+
+    wild_fmsa = os.path.join(msa_dir, f'{wild_prot_id}.msa')
+    mut_fmsa = os.path.join(msa_dir, f'{mut_prot_id}.msa')
+    if not os.path.exists(wild_fmsa) or not os.path.exists(mut_fmsa):
+        print('MSA missing; generating ...')
+        wild_frawmsa = os.path.join(pssm_dir, f'{wild_prot_id}.rawmsa')
+        mut_frawmsa = os.path.join(pssm_dir, f'{mut_prot_id}.rawmsa')
+        wild_fmsa = gen_msa(wild_prot_id, wild_seq, wild_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
+        mut_fmsa = gen_msa(mut_prot_id, mut_seq, mut_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
+
+    wild_res_freq = calc_res_freq(wild_fmsa)
+    mut_res_freq = calc_res_freq(mut_fmsa)
+
+    wild_cs = calculate_conservation_score().calculate_js_div_from_msa(wild_fmsa, blosum_background_distr)
+    mut_cs = calculate_conservation_score().calculate_js_div_from_msa(mut_fmsa, blosum_background_distr)
+
+    wild_data = {
+        'sasa_res': wild_rsasa,
+        'sasa_atom': wild_asasa,
+        'ss_dict': wild_ss,
+        'depth_dict': wild_depth,
+        'pssm_dict': wild_pssm,
+        'res_dict': wild_res_dict,
+        'hhm_score': wild_hhm,
+        'conservation_dict': wild_res_freq,
+        'conservation_score': wild_cs
+    }
+
+    mut_data = {
+        'sasa_res': mut_rsasa,
+        'sasa_atom': mut_asasa,
+        'ss_dict': mut_ss,
+        'depth_dict': mut_depth,
+        'pssm_dict': mut_pssm,
+        'res_dict': mut_res_dict,
+        'hhm_score': mut_hhm,
+        'conservation_dict': mut_res_freq,
+        'conservation_score': mut_cs
+    }
+
+    wild_selected_res, wild_selected_atom, wild_pdb_array = get_nearest_resindex(wild_pdb, chain_id, mut_pos, aa_num=16)
+    mut_selected_res, mut_selected_atom, mut_pdb_array = get_nearest_resindex(
+        mut_pdb if mutated_by_structure else wild_pdb, chain_id, mut_pos, aa_num=16
+    )
+    wild_res_dict2, wild_atom_dict = get_res_atom_dict(wild_pdb_array)
+    mut_res_dict2, mut_atom_dict = get_res_atom_dict(mut_pdb_array)
+
+    wild_res_feat_dict, wild_atom_feat_dict = feature_alignment(
+        wild_selected_res, wild_selected_atom, wild_data, wild_res_dict2, wild_atom_dict, pdbpos2uniprotpos_dict, mut_pos
+    )
+    mut_res_feat_dict, mut_atom_feat_dict = feature_alignment(
+        mut_selected_res, mut_selected_atom, mut_data, mut_res_dict2, mut_atom_dict, pdbpos2uniprotpos_dict, mut_pos
+    )
+
+    wild_pdb_array2, wild_res_index_pos_dict, wild_atom_index_pos = get_new_pdb_array(
+        wild_pdb_array, wild_res_feat_dict.keys(), wild_atom_feat_dict.keys()
+    )
+    mut_pdb_array2, mut_res_index_pos_dict, mut_atom_index_pos = get_new_pdb_array(
+        mut_pdb_array, mut_res_feat_dict.keys(), mut_atom_feat_dict.keys()
+    )
+
+    wild_res_edge_index, wild_res_edge_feature, wild_atom_res_index = get_edge().generate_res_edge_feature_postmut(
+        mut_pos, wild_pdb_array2)
+    mut_res_edge_index, mut_res_edge_feature, mut_atom_res_index = get_edge().generate_res_edge_feature_postmut(
+        mut_pos, mut_pdb_array2)
+
+    wild_atom_edge_index, wild_atom_edge_feature = get_edge().generate_atom_edge_feature(wild_pdb_array2)
+    mut_atom_edge_index, mut_atom_edge_feature = get_edge().generate_atom_edge_feature(mut_pdb_array2)
+
+    wild_res_node_feat = generate_node_feature(wild_res_feat_dict, wild_res_index_pos_dict, 105)
+    mut_res_node_feat = generate_node_feature(mut_res_feat_dict, mut_res_index_pos_dict, 105)
+
+    wild_atom_node_feat = generate_node_feature(wild_atom_feat_dict, wild_atom_index_pos, 5)
+    mut_atom_node_feat = generate_node_feature(mut_atom_feat_dict, mut_atom_index_pos, 5)
+
+    # ESM2 .pt files are keyed by FASTA basenames
+    wild_mb_data = get_esm2(wild_prot_id, wild_res_index_pos_dict, pdbpos2uniprotpos_dict, esm_dir)
+    mut_mb_data = get_esm2(mut_prot_id, mut_res_index_pos_dict, pdbpos2uniprotpos_dict, esm_dir)
+
+    # Save inputs (structure-dependent -> struct_id)
+    res_node_wt_path = f'{input_dir}/{struct_id}_RN_wt.npy'
+    res_edge_wt_path = f'{input_dir}/{struct_id}_RE_wt.npy'
+    res_edge_index_wt_path = f'{input_dir}/{struct_id}_REI_wt.npy'
+    atom_node_wt_path = f'{input_dir}/{struct_id}_AN_wt.npy'
+    atom_edge_wt_path = f'{input_dir}/{struct_id}_AE_wt.npy'
+    atoms_edge_index_wt_path = f'{input_dir}/{struct_id}_AEI_wt.npy'
+    atom2res_index_wt_path = f'{input_dir}/{struct_id}_I_wt.npy'
+    extra_feat_wt_path = f'{input_dir}/{struct_id}_EF_wt.npy'
+
+    res_node_mt_path = f'{input_dir}/{struct_id}_RN_mt.npy'
+    res_edge_mt_path = f'{input_dir}/{struct_id}_RE_mt.npy'
+    res_edge_index_mt_path = f'{input_dir}/{struct_id}_REI_mt.npy'
+    atom_node_mt_path = f'{input_dir}/{struct_id}_AN_mt.npy'
+    atom_edge_mt_path = f'{input_dir}/{struct_id}_AE_mt.npy'
+    atom_edge_index_mt_path = f'{input_dir}/{struct_id}_AEI_mt.npy'
+    atom2res_index_mt_path = f'{input_dir}/{struct_id}_I_mt.npy'
+    extra_feat_mt_path = f'{input_dir}/{struct_id}_EF_mt.npy'
+
+    np.save(res_node_wt_path, wild_res_node_feat)
+    np.save(res_edge_wt_path, wild_res_edge_feature)
+    np.save(res_edge_index_wt_path, wild_res_edge_index)
+    np.save(atom_node_wt_path, wild_atom_node_feat)
+    np.save(atom_edge_wt_path, wild_atom_edge_feature)
+    np.save(atoms_edge_index_wt_path, wild_atom_edge_index)
+    np.save(atom2res_index_wt_path, wild_atom_res_index)
+    np.save(extra_feat_wt_path, wild_mb_data)
+
+    np.save(res_node_mt_path, mut_res_node_feat)
+    np.save(res_edge_mt_path, mut_res_edge_feature)
+    np.save(res_edge_index_mt_path, mut_res_edge_index)
+    np.save(atom_node_mt_path, mut_atom_node_feat)
+    np.save(atom_edge_mt_path, mut_atom_edge_feature)
+    np.save(atom_edge_index_mt_path, mut_atom_edge_index)
+    np.save(atom2res_index_mt_path, mut_atom_res_index)
+    np.save(extra_feat_mt_path, mut_mb_data)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Step-aware feature generation for PILOT')
+    parser.add_argument('-i', '--mutant-list', dest='mutant_list', type=str, required=True,
+                        help='Input file: each line "pdb_id chain_id mut_pos amino_acid", e.g. 1A23 A 32 H/S')
+    parser.add_argument('-d', '--feature-dir', dest='dir', type=str, required=True,
+                        help='Root path to store intermediate features and model inputs.')
+    parser.add_argument('-s', '--step', dest='step', type=str, default='all',
+                        choices=['all', 'structures', 'precompute', 'precompute_psiblast_msa', 'precompute_hhblits',
+                                 'esm2', 'assemble'],
+                        help='Which pipeline step to run.')
+    parser.add_argument('--sasa-backend', dest='sasa_backend', type=str, default='naccess',
+                        choices=['naccess', 'freesasa'], help='SASA backend to use.')
+    parser.add_argument('--freesasa-path', dest='freesasa_path', type=str, default='freesasa',
+                        help='Path to freesasa binary if not on PATH.')
+
+    parser.add_argument('--mutator-backend', dest='mutator_backend', type=str, default='foldx',
+                        choices=['foldx', 'proxy', 'rosetta'],
+                        help='Mutant structure builder: foldx, rosetta, or proxy (no structural change).')
+
+    parser.add_argument('--rosetta-scripts-path', dest='rosetta_scripts_path', type=str,
+                        default=(shutil.which('rosetta_scripts.static.linuxgccrelease') or 'rosetta_scripts.static.linuxgccrelease'),
+                        help='Path to rosetta_scripts.static.linuxgccrelease (or mpi binary) if not on PATH.')
+
+    parser.add_argument('--skip-pdb-download', dest='skip_pdb_download', action='store_true',
+                        help='Do not download PDBs from RCSB. Require FEATURE_DIR/row_pdb files to already exist.')
+
+    parser.add_argument('--row-pdb-name-mode', dest='row_pdb_name_mode', default='pdb',
+                        choices=['pdb', 'pdb_chain'],
+                        help='How to name row_pdb inputs: {pdb_id}.pdb or {pdb_id}_{chain_id}.pdb.')
+    parser.add_argument('--row-pdb-suffix', dest='row_pdb_suffix', default='',
+                        help="Optional suffix appended before .pdb for row_pdb and cleaned_pdb WT files (e.g. '_esmfold').")
+
+    args = parser.parse_args()
+
+    global freesasa_path
+    freesasa_path = args.freesasa_path
+
+    global rosetta_scripts_path
+    rosetta_scripts_path = args.rosetta_scripts_path
+
+    with open(args.mutant_list, 'r') as f_r:
+        for lnum, line in enumerate(f_r, 1):
+            raw = line.rstrip('\n')
+            if not raw or raw.lstrip().startswith('#'):
+                continue
+            mut_info = raw.split()
+            if len(mut_info) != 4:
+                raise ValueError(f'Malformed mutation line at {args.mutant_list}:{lnum}: '
+                                 f'expected 4 fields "pdb_id chain_id mut_pos amino_acid", got {len(mut_info)}: {raw!r}')
+            pdb_id, chain_id, mut_pos, aa_field = mut_info
+            if '/' not in aa_field or len(aa_field) < 3:
+                raise ValueError(f'Malformed amino_acid field at {args.mutant_list}:{lnum}: expected like H/S, got {aa_field!r}')
+            wild_type = aa_field[0]
+            mutant = aa_field[-1]
+            gen_features(
+                pdb_id, chain_id, mut_pos, wild_type, mutant, args.dir,
+                sasa_backend=args.sasa_backend,
+                step=args.step,
+                mutator_backend=args.mutator_backend,
+                skip_pdb_download=args.skip_pdb_download,
+                row_pdb_name_mode=args.row_pdb_name_mode,
+                row_pdb_suffix=args.row_pdb_suffix,
+            )
+
+
+if __name__ == "__main__":
+    main()
