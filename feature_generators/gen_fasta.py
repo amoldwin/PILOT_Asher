@@ -26,6 +26,18 @@ NON_STANDARD_SUBSTITUTIONS = {
 }
 
 
+def _normalize_suffix(suffix: str) -> str:
+    """
+    Normalize suffix so:
+      - "" stays ""
+      - "esmfold" -> "_esmfold"
+      - "_esmfold" stays "_esmfold"
+    """
+    if not suffix:
+        return ""
+    return suffix if suffix.startswith("_") else "_" + suffix
+
+
 def _get_single_chain_id_from_pdb(pdbfile: str) -> str | None:
     """
     Return the only chain id present in model 0 if there is exactly one chain; else None.
@@ -89,20 +101,28 @@ def gen_all_fasta(
     fasta_dir,
     mutated_by_structure=True,
     mut_id=None,
+    cleaned_pdb_suffix: str = "",
+    fasta_suffix: str = "",
 ):
     """
     If mutated_by_structure is False, construct the mutant sequence by editing the wild sequence
     at mut_pos instead of reading a mutant PDB.
 
-    IMPORTANT: mut_id may be backend-tagged (e.g. ...__rosetta). If not provided, we fall back
-    to legacy naming (not recommended).
+    - cleaned_pdb_suffix controls which WT cleaned PDB is read:
+        cleaned_pdb/{pdb_id}_{chain_id}{suffix}.pdb   (e.g. _esmfold)
+    - fasta_suffix controls naming of WT/mut fasta outputs (to avoid collisions across runs):
+        fasta/{pdb_id}_{chain_id}{suffix}.fasta
+        fasta/{mut_id}{suffix}.fasta
     """
     pdbpos2uniprotpos_dict = {}
 
     if mut_id is None:
         mut_id = pdb_id + '_' + chain_id + '_' + wild_type + mut_pos + mutant
 
-    wild_pdb = f'{cleaned_pdb_dir}/{pdb_id}_{chain_id}.pdb'
+    cleaned_pdb_suffix = _normalize_suffix(cleaned_pdb_suffix)
+    fasta_suffix = _normalize_suffix(fasta_suffix)
+
+    wild_pdb = f'{cleaned_pdb_dir}/{pdb_id}_{chain_id}{cleaned_pdb_suffix}.pdb'
     mut_pdb = f'{cleaned_pdb_dir}/{mut_id}.pdb'
 
     if not os.path.exists(wild_pdb) or os.path.getsize(wild_pdb) == 0:
@@ -113,23 +133,22 @@ def gen_all_fasta(
     if mutated_by_structure and os.path.exists(mut_pdb):
         mut_seq, _ = read_pdb(mut_pdb, chain_id)
     else:
-        # proxy mode: mutate sequence directly
         if mut_pos not in pdb_positions:
             raise ValueError(f'mut_pos {mut_pos} not found in {pdb_id}_{chain_id} positions {pdb_positions[:5]}...')
         idx = pdb_positions.index(mut_pos)
         mut_seq = wild_seq[:idx] + mutant + wild_seq[idx + 1:]
 
     os.makedirs(fasta_dir, exist_ok=True)
-    wild_fasta = f'{fasta_dir}/{pdb_id}_{chain_id}.fasta'
-    mut_fasta = f'{fasta_dir}/{mut_id}.fasta'
+    wild_fasta = f'{fasta_dir}/{pdb_id}_{chain_id}{fasta_suffix}.fasta'
+    mut_fasta = f'{fasta_dir}/{mut_id}{fasta_suffix}.fasta'
 
     if not os.path.exists(wild_fasta):
         with open(wild_fasta, 'w') as f_wild:
-            f_wild.write(f'> {pdb_id}_{chain_id}\n{wild_seq}')
+            f_wild.write(f'> {pdb_id}_{chain_id}{fasta_suffix}\n{wild_seq}\n')
 
     if not os.path.exists(mut_fasta):
         with open(mut_fasta, 'w') as f_mut:
-            f_mut.write(f'> {mut_id}\n{mut_seq}')
+            f_mut.write(f'> {mut_id}{fasta_suffix}\n{mut_seq}\n')
 
     for i, pos1 in enumerate(pdb_positions):
         pdbpos2uniprotpos_dict[pos1] = i + 1
