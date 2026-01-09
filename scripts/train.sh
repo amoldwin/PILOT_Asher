@@ -30,9 +30,9 @@ export TORCH_HOME=/scratch/amoldwin/torch_cache
 
 python train.py --train dataset/training_set_dTm.txt \
   --test dataset/test_set_dTm.txt \
-  --feature-dir /scratch/amoldwin/datasets/PILOT \
+  --feature-dir /scratch/amoldwin/datasets/PILOT_dTm_esmfold \
   --job-id ddg_$SLURM_JOB_ID \
-  --seed 123 \
+  --seed 0 \
   --epochs 30 \
   --lr 1e-4 \
   --out-dir runs \

@@ -206,7 +206,7 @@ class PilotNPYDataset(Dataset):
         feature_dir: str,
         input_subdir: str = "input",
         warn_missing: bool = True,
-        max_warn_missing: int = 20,
+        max_warn_missing: int = 20000,
         missing_mut_ids: Optional[Set[str]] = None,
         sanitize: bool = True,
         warn_sanitize: bool = True,

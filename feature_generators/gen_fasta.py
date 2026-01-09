@@ -1,6 +1,7 @@
 import os
 from Bio.PDB import PDBParser
 from Bio.PDB.Polypeptide import three_to_one, is_aa
+from typing import Optional
 
 
 NON_STANDARD_SUBSTITUTIONS = {
@@ -32,7 +33,7 @@ def _normalize_suffix(suffix: str) -> str:
     return suffix if suffix.startswith("_") else "_" + suffix
 
 
-def _get_single_chain_id_from_pdb(pdbfile: str) -> str | None:
+def _get_single_chain_id_from_pdb(pdbfile: str) -> Optional[str]:
     parser = PDBParser(QUIET=True)
     struct = parser.get_structure('PDB', pdbfile)
     model = struct[0]
