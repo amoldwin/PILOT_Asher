@@ -513,32 +513,83 @@ def get_pssm(pssm_path):
     return new_pssm_dict, res_dict
 
 
-def process_hhm(path):
-    with open(path, "r") as fin:
-        fin_data = fin.readlines()
-        hhm_begin_line = 0
-        hhm_end_line = 0
+def process_hhm(path, expected_len: int | None = None):
+    """
+    Parse HHblits .hhm profile into an (L,30) float array in [0,1].
+
+    Robustness:
+    - If the file is malformed/truncated/unexpected, return zeros of shape (expected_len,30) if provided,
+      else attempt to infer L, else return (0,30).
+    - This prevents single bad HHM files from killing large SLURM arrays.
+    """
+    def _fallback():
+        L = 0
+        if expected_len is not None and expected_len > 0:
+            L = int(expected_len)
+        return np.zeros((L, 30), dtype=np.float32)
+
+    try:
+        with open(path, "r") as fin:
+            fin_data = fin.readlines()
+
+        hhm_begin_line = None
+        hhm_end_line = None
         for i in range(len(fin_data)):
-            if "#" in fin_data[i]:
+            if "#" in fin_data[i] and hhm_begin_line is None:
                 hhm_begin_line = i + 5
-            elif "//" in fin_data[i]:
+            if "//" in fin_data[i]:
                 hhm_end_line = i
-        feature = np.zeros([int((hhm_end_line - hhm_begin_line) / 3), 30])
+                break
+
+        if hhm_begin_line is None or hhm_end_line is None or hhm_end_line <= hhm_begin_line:
+            print(f"[process_hhm] WARNING: could not find HHM table region in {path}; using zeros.", flush=True)
+            return _fallback()
+
+        n_rows = int((hhm_end_line - hhm_begin_line) / 3)
+        if n_rows <= 0:
+            return _fallback()
+
+        feature = np.zeros([n_rows, 30], dtype=np.float32)
         axis_x = 0
+
         for i in range(hhm_begin_line, hhm_end_line, 3):
+            if axis_x >= n_rows:
+                break
             line1 = fin_data[i].split()[2:-1]
-            line2 = fin_data[i + 1].split()
+            line2 = fin_data[i + 1].split() if (i + 1) < len(fin_data) else []
+
             axis_y = 0
             for j in line1:
-                feature[axis_x][axis_y] = (9999 if j == "*" else float(j)) / 10000.0
+                if axis_y >= 30:
+                    break
+                try:
+                    v = 9999.0 if j == "*" else float(j)
+                except ValueError:
+                    # malformed token like 'F'
+                    print(f"[process_hhm] WARNING: non-numeric token {j!r} in {path}; using zeros.", flush=True)
+                    return _fallback()
+                feature[axis_x][axis_y] = v / 10000.0
                 axis_y += 1
+
             for j in line2:
-                feature[axis_x][axis_y] = (9999 if j == "*" else float(j)) / 10000.0
+                if axis_y >= 30:
+                    break
+                try:
+                    v = 9999.0 if j == "*" else float(j)
+                except ValueError:
+                    print(f"[process_hhm] WARNING: non-numeric token {j!r} in {path}; using zeros.", flush=True)
+                    return _fallback()
+                feature[axis_x][axis_y] = v / 10000.0
                 axis_y += 1
+
             axis_x += 1
+
         den = (np.max(feature) - np.min(feature))
         feature = (feature - np.min(feature)) / (den + 1e-8)
         return feature
+    except Exception as e:
+        print(f"[process_hhm] WARNING: failed to parse {path}: {e}; using zeros.", flush=True)
+        return _fallback()
 
 
 def loadAASeq(infile):

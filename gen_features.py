@@ -266,8 +266,8 @@ def gen_features(
         print('HHM missing; running hhblits ...')
         wild_fhhm = use_hhblits(wild_prot_id, wild_fasta, hhblits_path, uniRef30_path, hhm_dir)
         mut_fhhm = use_hhblits(mut_prot_id, mut_fasta, hhblits_path, uniRef30_path, hhm_dir)
-    wild_hhm = process_hhm(wild_fhhm)
-    mut_hhm = process_hhm(mut_fhhm)
+        wild_hhm = process_hhm(wild_fhhm, expected_len=len(wild_seq))
+        mut_hhm = process_hhm(mut_fhhm, expected_len=len(mut_seq))
 
     wild_fmsa = os.path.join(msa_dir, f'{wild_prot_id}.msa')
     mut_fmsa = os.path.join(msa_dir, f'{mut_prot_id}.msa')
