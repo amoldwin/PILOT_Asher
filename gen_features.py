@@ -159,6 +159,10 @@ def gen_features(
       - precompute_hhblits        (hhblits only)
       - esm2
       - assemble
+
+    IMPORTANT (read-only assemble behavior):
+      In step='assemble', this pipeline will NOT run psiblast/hhblits/clustalo/esm2 even if outputs are missing.
+      It will only read precomputed artifacts and if anything required is missing, it will write fallback input/*.npy.
     """
     row_pdb_dir, cleaned_pdb_dir, fasta_dir, pssm_dir, msa_dir, hhm_dir, sasa_dir, esm_dir, input_dir = _ensure_dirs(dir)
 
@@ -258,7 +262,7 @@ def gen_features(
             return
 
     # ----------------------------
-    # Assemble (with hard fallback)
+    # Assemble (READ-ONLY + fallback)
     # ----------------------------
     print('Assembling features ...')
     try:
@@ -269,61 +273,48 @@ def gen_features(
         mut_rsa = os.path.join(sasa_dir, f'{struct_id}.rsa')
         mut_asa = os.path.join(sasa_dir, f'{struct_id}.asa')
 
-        def _ensure_sasa(pdb_file, rsa_path, asa_path):
-            if not (_nonempty(rsa_path) and _nonempty(asa_path)):
-                if sasa_backend.lower() == 'freesasa':
-                    use_freesasa(pdb_file, sasa_dir, freesasa_path)
-                else:
-                    use_naccess(pdb_file, sasa_dir, naccess_path)
-
-        _ensure_sasa(wild_pdb, wild_rsa, wild_asa)
+        # READ-ONLY: do not compute SASA here; require files exist or fallback
+        if not (_nonempty(wild_rsa) and _nonempty(wild_asa)):
+            raise FileNotFoundError(f"SASA missing for assemble: {wild_rsa} or {wild_asa}")
         if mutated_by_structure:
-            _ensure_sasa(mut_pdb, mut_rsa, mut_asa)
+            if not (_nonempty(mut_rsa) and _nonempty(mut_asa)):
+                raise FileNotFoundError(f"SASA missing for assemble (mut): {mut_rsa} or {mut_asa}")
         else:
-            if not _nonempty(mut_rsa):
-                shutil.copyfile(wild_rsa, mut_rsa)
-            if not _nonempty(mut_asa):
-                shutil.copyfile(wild_asa, mut_asa)
+            # proxy mutation: allow reuse of WT rsa/asa by copying earlier in precompute; if missing, fallback
+            if not (_nonempty(mut_rsa) and _nonempty(mut_asa)):
+                raise FileNotFoundError(f"SASA missing for assemble (proxy mut): {mut_rsa} or {mut_asa}")
 
         wild_rsasa, wild_asasa = calc_SASA(wild_rsa, wild_asa)
         mut_rsasa, mut_asasa = calc_SASA(mut_rsa, mut_asa)
 
+        # DSSP/depth are OK to compute here (no BLAST/HHblits/Clustal)
         wild_ss = calc_ss(wild_pdb, dssp_path)
         mut_ss = calc_ss(mut_pdb if mutated_by_structure else wild_pdb, dssp_path)
 
         wild_depth = calc_depth(wild_pdb, chain_id)
         mut_depth = calc_depth(mut_pdb if mutated_by_structure else wild_pdb, chain_id)
 
-        # PSSM (treat empty as missing)
+        # PSSM (READ-ONLY)
         wild_fpssm = os.path.join(pssm_dir, f'{wild_prot_id}.pssm')
         mut_fpssm = os.path.join(pssm_dir, f'{mut_prot_id}.pssm')
         if not _nonempty(wild_fpssm) or not _nonempty(mut_fpssm):
-            print('PSSM missing; running psiblast ...')
-            _ = use_psiblast(wild_fasta, pssm_dir, psi_path, uniref90_path)
-            _ = use_psiblast(mut_fasta, pssm_dir, psi_path, uniref90_path)
+            raise FileNotFoundError(f"PSSM missing for assemble: {wild_fpssm} or {mut_fpssm}")
         wild_pssm, wild_res_dict = get_pssm(wild_fpssm)
         mut_pssm, mut_res_dict = get_pssm(mut_fpssm)
 
-        # HHM
+        # HHM (READ-ONLY; parser is robust)
         wild_fhhm = os.path.join(hhm_dir, f'{wild_prot_id}.hhm')
         mut_fhhm = os.path.join(hhm_dir, f'{mut_prot_id}.hhm')
         if not _nonempty(wild_fhhm) or not _nonempty(mut_fhhm):
-            print('HHM missing; running hhblits ...')
-            wild_fhhm = use_hhblits(wild_prot_id, wild_fasta, hhblits_path, uniRef30_path, hhm_dir)
-            mut_fhhm = use_hhblits(mut_prot_id, mut_fasta, hhblits_path, uniRef30_path, hhm_dir)
-
+            raise FileNotFoundError(f"HHM missing for assemble: {wild_fhhm} or {mut_fhhm}")
         wild_hhm = process_hhm(wild_fhhm, expected_len=len(wild_seq))
         mut_hhm = process_hhm(mut_fhhm, expected_len=len(mut_seq))
 
-        # MSA (treat empty as missing)
+        # MSA (READ-ONLY)
         wild_fmsa = os.path.join(msa_dir, f'{wild_prot_id}.msa')
         mut_fmsa = os.path.join(msa_dir, f'{mut_prot_id}.msa')
         if not _nonempty(wild_fmsa) or not _nonempty(mut_fmsa):
-            print('MSA missing; generating ...')
-            wild_frawmsa = os.path.join(pssm_dir, f'{wild_prot_id}.rawmsa')
-            mut_frawmsa = os.path.join(pssm_dir, f'{mut_prot_id}.rawmsa')
-            wild_fmsa = gen_msa(wild_prot_id, wild_seq, wild_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
-            mut_fmsa = gen_msa(mut_prot_id, mut_seq, mut_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
+            raise FileNotFoundError(f"MSA missing for assemble: {wild_fmsa} or {mut_fmsa}")
 
         wild_res_freq = calc_res_freq(wild_fmsa)
         mut_res_freq = calc_res_freq(mut_fmsa)
@@ -393,6 +384,12 @@ def gen_features(
 
         wild_atom_node_feat = generate_node_feature(wild_atom_feat_dict, wild_atom_index_pos, 5)
         mut_atom_node_feat = generate_node_feature(mut_atom_feat_dict, mut_atom_index_pos, 5)
+
+        # ESM2 (READ-ONLY)
+        wild_pt = os.path.join(esm_dir, f'{wild_prot_id}.pt')
+        mut_pt = os.path.join(esm_dir, f'{mut_prot_id}.pt')
+        if not _nonempty(wild_pt) or not _nonempty(mut_pt):
+            raise FileNotFoundError(f"ESM2 embedding missing for assemble: {wild_pt} or {mut_pt}")
 
         wild_mb_data = get_esm2(wild_prot_id, wild_res_index_pos_dict, pdbpos2uniprotpos_dict, esm_dir)
         mut_mb_data = get_esm2(mut_prot_id, mut_res_index_pos_dict, pdbpos2uniprotpos_dict, esm_dir)

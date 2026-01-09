@@ -28,8 +28,8 @@ export TORCH_HOME=/scratch/amoldwin/torch_cache
 ##   --lr 1e-4 \
 ##   --out-dir runs
 
-python train.py --train dataset/training_set_filtered.txt \
-  --test dataset/test_set.txt \
+python train.py --train dataset/training_set_dTm.txt \
+  --test dataset/test_set_dTm.txt \
   --feature-dir /scratch/amoldwin/datasets/PILOT \
   --job-id ddg_$SLURM_JOB_ID \
   --seed 123 \
@@ -37,4 +37,4 @@ python train.py --train dataset/training_set_filtered.txt \
   --lr 1e-4 \
   --out-dir runs \
   --mutator-backend rosetta \
-  --label-col rosetta
+  --label-col dTm
