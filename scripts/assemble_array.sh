@@ -34,4 +34,9 @@ echo "Assemble: ${LINE}"
 python gen_features.py \
   -i <(echo "${LINE}") \
   -d "${FEATURE_DIR}" \
-  -s assemble
+  -s assemble \
+  --mutator-backend rosetta \
+  --rosetta-scripts-path rosetta_scripts.static.linuxgccrelease \
+  --skip-pdb-download \
+  --row-pdb-name-mode pdb_chain \
+  --continue-on-error
