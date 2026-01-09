@@ -115,10 +115,6 @@ def gen_features(
       - precompute_hhblits        (hhblits only)
       - esm2
       - assemble
-
-    NOTE on suffixing (mode B):
-      If row_pdb_suffix is set (e.g. "_esmfold"), then this run will also suffix FASTA/pssm/rawmsa/msa/hhm/esm
-      by deriving all sequence-derived IDs from FASTA basenames.
     """
     row_pdb_dir, cleaned_pdb_dir, fasta_dir, pssm_dir, msa_dir, hhm_dir, sasa_dir, esm_dir, input_dir = _ensure_dirs(dir)
 
@@ -260,14 +256,17 @@ def gen_features(
     wild_pssm, wild_res_dict = get_pssm(wild_fpssm)
     mut_pssm, mut_res_dict = get_pssm(mut_fpssm)
 
+    # ---- FIXED: HHM always parsed ----
     wild_fhhm = os.path.join(hhm_dir, f'{wild_prot_id}.hhm')
     mut_fhhm = os.path.join(hhm_dir, f'{mut_prot_id}.hhm')
     if not os.path.exists(wild_fhhm) or not os.path.exists(mut_fhhm):
         print('HHM missing; running hhblits ...')
         wild_fhhm = use_hhblits(wild_prot_id, wild_fasta, hhblits_path, uniRef30_path, hhm_dir)
         mut_fhhm = use_hhblits(mut_prot_id, mut_fasta, hhblits_path, uniRef30_path, hhm_dir)
-        wild_hhm = process_hhm(wild_fhhm, expected_len=len(wild_seq))
-        mut_hhm = process_hhm(mut_fhhm, expected_len=len(mut_seq))
+
+    wild_hhm = process_hhm(wild_fhhm, expected_len=len(wild_seq))
+    mut_hhm = process_hhm(mut_fhhm, expected_len=len(mut_seq))
+    # ---- end fix ----
 
     wild_fmsa = os.path.join(msa_dir, f'{wild_prot_id}.msa')
     mut_fmsa = os.path.join(msa_dir, f'{mut_prot_id}.msa')
@@ -415,7 +414,6 @@ def main():
     parser.add_argument('--row-pdb-suffix', dest='row_pdb_suffix', default='',
                         help="Optional suffix appended before .pdb for row_pdb and cleaned_pdb WT files (e.g. '_esmfold').")
 
-    # NEW: keep going on per-mutation failures
     parser.add_argument('--continue-on-error', dest='continue_on_error', action='store_true',
                         help='If set, failures for one mutation are printed to stderr and the script continues.')
 
@@ -471,7 +469,7 @@ def main():
                     print(header, file=sys.stderr, flush=True)
                     print(str(e), file=sys.stderr, flush=True)
                     print(traceback.format_exc(), file=sys.stderr, flush=True)
-                    # continue to next line
+                    continue
 
 
 if __name__ == "__main__":
