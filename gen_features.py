@@ -40,6 +40,50 @@ def _nonempty(p: str) -> bool:
         return False
 
 
+def _write_fallback_inputs(input_dir: str, struct_id: str, mut_index: int = 8):
+    """
+    Write placeholder arrays with correct shapes for the model to input_dir.
+    Always writes both WT and MT files.
+    """
+    os.makedirs(input_dir, exist_ok=True)
+
+    def make_one(suffix: str):
+        rn = np.zeros((16, 105), dtype=np.float64)
+        rn[:, -1] = 0.0
+        rn[mut_index, -1] = 1.0
+
+        re = np.zeros((16, 2), dtype=np.float64)
+
+        rei = np.zeros((2, 16), dtype=np.int64)
+        rei[0, :] = mut_index
+        rei[1, :] = np.arange(16, dtype=np.int64)
+
+        an = np.zeros((1, 5), dtype=np.float64)
+
+        ae = np.zeros((1, 3), dtype=np.float64)
+        aei = np.zeros((2, 1), dtype=np.int64)
+        aei[0, 0] = 0
+        aei[1, 0] = 0
+
+        index = np.zeros((16, 2), dtype=np.int64)
+        index[:, 0] = 0
+        index[:, 1] = 0
+
+        ef = np.zeros((16, 1280), dtype=np.float64)
+
+        np.save(f'{input_dir}/{struct_id}_RN_{suffix}.npy', rn)
+        np.save(f'{input_dir}/{struct_id}_RE_{suffix}.npy', re)
+        np.save(f'{input_dir}/{struct_id}_REI_{suffix}.npy', rei)
+        np.save(f'{input_dir}/{struct_id}_AN_{suffix}.npy', an)
+        np.save(f'{input_dir}/{struct_id}_AE_{suffix}.npy', ae)
+        np.save(f'{input_dir}/{struct_id}_AEI_{suffix}.npy', aei)
+        np.save(f'{input_dir}/{struct_id}_I_{suffix}.npy', index)
+        np.save(f'{input_dir}/{struct_id}_EF_{suffix}.npy', ef)
+
+    make_one("wt")
+    make_one("mt")
+
+
 def get_new_pdb_array(pdb_array, res_pdbpos, atom_indexpos):
     new_pdb_array = []
     res_index_pos_dict, atom_index_pos = {}, {}
@@ -213,173 +257,177 @@ def gen_features(
         if step == 'esm2':
             return
 
+    # ----------------------------
+    # Assemble (with hard fallback)
+    # ----------------------------
     print('Assembling features ...')
+    try:
+        wild_pdb_name = os.path.basename(wild_pdb).split('.')[0]
+        wild_rsa = os.path.join(sasa_dir, f'{wild_pdb_name}.rsa')
+        wild_asa = os.path.join(sasa_dir, f'{wild_pdb_name}.asa')
 
-    wild_pdb_name = os.path.basename(wild_pdb).split('.')[0]
-    wild_rsa = os.path.join(sasa_dir, f'{wild_pdb_name}.rsa')
-    wild_asa = os.path.join(sasa_dir, f'{wild_pdb_name}.asa')
+        mut_rsa = os.path.join(sasa_dir, f'{struct_id}.rsa')
+        mut_asa = os.path.join(sasa_dir, f'{struct_id}.asa')
 
-    mut_rsa = os.path.join(sasa_dir, f'{struct_id}.rsa')
-    mut_asa = os.path.join(sasa_dir, f'{struct_id}.asa')
+        def _ensure_sasa(pdb_file, rsa_path, asa_path):
+            if not (_nonempty(rsa_path) and _nonempty(asa_path)):
+                if sasa_backend.lower() == 'freesasa':
+                    use_freesasa(pdb_file, sasa_dir, freesasa_path)
+                else:
+                    use_naccess(pdb_file, sasa_dir, naccess_path)
 
-    def _ensure_sasa(pdb_file, rsa_path, asa_path):
-        if not (_nonempty(rsa_path) and _nonempty(asa_path)):
-            if sasa_backend.lower() == 'freesasa':
-                use_freesasa(pdb_file, sasa_dir, freesasa_path)
-            else:
-                use_naccess(pdb_file, sasa_dir, naccess_path)
+        _ensure_sasa(wild_pdb, wild_rsa, wild_asa)
+        if mutated_by_structure:
+            _ensure_sasa(mut_pdb, mut_rsa, mut_asa)
+        else:
+            if not _nonempty(mut_rsa):
+                shutil.copyfile(wild_rsa, mut_rsa)
+            if not _nonempty(mut_asa):
+                shutil.copyfile(wild_asa, mut_asa)
 
-    _ensure_sasa(wild_pdb, wild_rsa, wild_asa)
-    if mutated_by_structure:
-        _ensure_sasa(mut_pdb, mut_rsa, mut_asa)
-    else:
-        if not _nonempty(mut_rsa):
-            shutil.copyfile(wild_rsa, mut_rsa)
-        if not _nonempty(mut_asa):
-            shutil.copyfile(wild_asa, mut_asa)
+        wild_rsasa, wild_asasa = calc_SASA(wild_rsa, wild_asa)
+        mut_rsasa, mut_asasa = calc_SASA(mut_rsa, mut_asa)
 
-    wild_rsasa, wild_asasa = calc_SASA(wild_rsa, wild_asa)
-    mut_rsasa, mut_asasa = calc_SASA(mut_rsa, mut_asa)
+        wild_ss = calc_ss(wild_pdb, dssp_path)
+        mut_ss = calc_ss(mut_pdb if mutated_by_structure else wild_pdb, dssp_path)
 
-    wild_ss = calc_ss(wild_pdb, dssp_path)
-    mut_ss = calc_ss(mut_pdb if mutated_by_structure else wild_pdb, dssp_path)
+        wild_depth = calc_depth(wild_pdb, chain_id)
+        mut_depth = calc_depth(mut_pdb if mutated_by_structure else wild_pdb, chain_id)
 
-    wild_depth = calc_depth(wild_pdb, chain_id)
-    mut_depth = calc_depth(mut_pdb if mutated_by_structure else wild_pdb, chain_id)
+        # PSSM (treat empty as missing)
+        wild_fpssm = os.path.join(pssm_dir, f'{wild_prot_id}.pssm')
+        mut_fpssm = os.path.join(pssm_dir, f'{mut_prot_id}.pssm')
+        if not _nonempty(wild_fpssm) or not _nonempty(mut_fpssm):
+            print('PSSM missing; running psiblast ...')
+            _ = use_psiblast(wild_fasta, pssm_dir, psi_path, uniref90_path)
+            _ = use_psiblast(mut_fasta, pssm_dir, psi_path, uniref90_path)
+        wild_pssm, wild_res_dict = get_pssm(wild_fpssm)
+        mut_pssm, mut_res_dict = get_pssm(mut_fpssm)
 
-    wild_fpssm = os.path.join(pssm_dir, f'{wild_prot_id}.pssm')
-    mut_fpssm = os.path.join(pssm_dir, f'{mut_prot_id}.pssm')
-    if not os.path.exists(wild_fpssm) or not os.path.exists(mut_fpssm):
-        print('PSSM missing; running psiblast ...')
-        wild_frawmsa, wild_fpssm = use_psiblast(wild_fasta, pssm_dir, psi_path, uniref90_path)
-        mut_frawmsa, mut_fpssm = use_psiblast(mut_fasta, pssm_dir, psi_path, uniref90_path)
-    wild_pssm, wild_res_dict = get_pssm(wild_fpssm)
-    mut_pssm, mut_res_dict = get_pssm(mut_fpssm)
+        # HHM
+        wild_fhhm = os.path.join(hhm_dir, f'{wild_prot_id}.hhm')
+        mut_fhhm = os.path.join(hhm_dir, f'{mut_prot_id}.hhm')
+        if not _nonempty(wild_fhhm) or not _nonempty(mut_fhhm):
+            print('HHM missing; running hhblits ...')
+            wild_fhhm = use_hhblits(wild_prot_id, wild_fasta, hhblits_path, uniRef30_path, hhm_dir)
+            mut_fhhm = use_hhblits(mut_prot_id, mut_fasta, hhblits_path, uniRef30_path, hhm_dir)
 
-    # ---- FIXED: HHM always parsed ----
-    wild_fhhm = os.path.join(hhm_dir, f'{wild_prot_id}.hhm')
-    mut_fhhm = os.path.join(hhm_dir, f'{mut_prot_id}.hhm')
-    if not os.path.exists(wild_fhhm) or not os.path.exists(mut_fhhm):
-        print('HHM missing; running hhblits ...')
-        wild_fhhm = use_hhblits(wild_prot_id, wild_fasta, hhblits_path, uniRef30_path, hhm_dir)
-        mut_fhhm = use_hhblits(mut_prot_id, mut_fasta, hhblits_path, uniRef30_path, hhm_dir)
+        wild_hhm = process_hhm(wild_fhhm, expected_len=len(wild_seq))
+        mut_hhm = process_hhm(mut_fhhm, expected_len=len(mut_seq))
 
-    wild_hhm = process_hhm(wild_fhhm, expected_len=len(wild_seq))
-    mut_hhm = process_hhm(mut_fhhm, expected_len=len(mut_seq))
-    # ---- end fix ----
+        # MSA (treat empty as missing)
+        wild_fmsa = os.path.join(msa_dir, f'{wild_prot_id}.msa')
+        mut_fmsa = os.path.join(msa_dir, f'{mut_prot_id}.msa')
+        if not _nonempty(wild_fmsa) or not _nonempty(mut_fmsa):
+            print('MSA missing; generating ...')
+            wild_frawmsa = os.path.join(pssm_dir, f'{wild_prot_id}.rawmsa')
+            mut_frawmsa = os.path.join(pssm_dir, f'{mut_prot_id}.rawmsa')
+            wild_fmsa = gen_msa(wild_prot_id, wild_seq, wild_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
+            mut_fmsa = gen_msa(mut_prot_id, mut_seq, mut_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
 
-    wild_fmsa = os.path.join(msa_dir, f'{wild_prot_id}.msa')
-    mut_fmsa = os.path.join(msa_dir, f'{mut_prot_id}.msa')
-    if not os.path.exists(wild_fmsa) or not os.path.exists(mut_fmsa):
-        print('MSA missing; generating ...')
-        wild_frawmsa = os.path.join(pssm_dir, f'{wild_prot_id}.rawmsa')
-        mut_frawmsa = os.path.join(pssm_dir, f'{mut_prot_id}.rawmsa')
-        wild_fmsa = gen_msa(wild_prot_id, wild_seq, wild_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
-        mut_fmsa = gen_msa(mut_prot_id, mut_seq, mut_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
+        wild_res_freq = calc_res_freq(wild_fmsa)
+        mut_res_freq = calc_res_freq(mut_fmsa)
 
-    wild_res_freq = calc_res_freq(wild_fmsa)
-    mut_res_freq = calc_res_freq(mut_fmsa)
+        wild_cs = calculate_conservation_score().calculate_js_div_from_msa(wild_fmsa, blosum_background_distr)
+        mut_cs = calculate_conservation_score().calculate_js_div_from_msa(mut_fmsa, blosum_background_distr)
 
-    wild_cs = calculate_conservation_score().calculate_js_div_from_msa(wild_fmsa, blosum_background_distr)
-    mut_cs = calculate_conservation_score().calculate_js_div_from_msa(mut_fmsa, blosum_background_distr)
+        wild_data = {
+            'sasa_res': wild_rsasa,
+            'sasa_atom': wild_asasa,
+            'ss_dict': wild_ss,
+            'depth_dict': wild_depth,
+            'pssm_dict': wild_pssm,
+            'res_dict': wild_res_dict,
+            'hhm_score': wild_hhm,
+            'conservation_dict': wild_res_freq,
+            'conservation_score': wild_cs
+        }
 
-    wild_data = {
-        'sasa_res': wild_rsasa,
-        'sasa_atom': wild_asasa,
-        'ss_dict': wild_ss,
-        'depth_dict': wild_depth,
-        'pssm_dict': wild_pssm,
-        'res_dict': wild_res_dict,
-        'hhm_score': wild_hhm,
-        'conservation_dict': wild_res_freq,
-        'conservation_score': wild_cs
-    }
+        mut_data = {
+            'sasa_res': mut_rsasa,
+            'sasa_atom': mut_asasa,
+            'ss_dict': mut_ss,
+            'depth_dict': mut_depth,
+            'pssm_dict': mut_pssm,
+            'res_dict': mut_res_dict,
+            'hhm_score': mut_hhm,
+            'conservation_dict': mut_res_freq,
+            'conservation_score': mut_cs
+        }
 
-    mut_data = {
-        'sasa_res': mut_rsasa,
-        'sasa_atom': mut_asasa,
-        'ss_dict': mut_ss,
-        'depth_dict': mut_depth,
-        'pssm_dict': mut_pssm,
-        'res_dict': mut_res_dict,
-        'hhm_score': mut_hhm,
-        'conservation_dict': mut_res_freq,
-        'conservation_score': mut_cs
-    }
+        wild_selected_res, wild_selected_atom, wild_pdb_array = get_nearest_resindex(wild_pdb, chain_id, mut_pos, aa_num=16)
+        mut_selected_res, mut_selected_atom, mut_pdb_array = get_nearest_resindex(
+            mut_pdb if mutated_by_structure else wild_pdb, chain_id, mut_pos, aa_num=16
+        )
 
-    wild_selected_res, wild_selected_atom, wild_pdb_array = get_nearest_resindex(wild_pdb, chain_id, mut_pos, aa_num=16)
-    mut_selected_res, mut_selected_atom, mut_pdb_array = get_nearest_resindex(
-        mut_pdb if mutated_by_structure else wild_pdb, chain_id, mut_pos, aa_num=16
-    )
-    wild_res_dict2, wild_atom_dict = get_res_atom_dict(wild_pdb_array)
-    mut_res_dict2, mut_atom_dict = get_res_atom_dict(mut_pdb_array)
+        if (not wild_selected_res) or (not mut_selected_res):
+            raise ValueError("get_nearest_resindex returned empty selection (chain/mut_pos mismatch or empty PDB array).")
 
-    wild_res_feat_dict, wild_atom_feat_dict = feature_alignment(
-        wild_selected_res, wild_selected_atom, wild_data, wild_res_dict2, wild_atom_dict, pdbpos2uniprotpos_dict, mut_pos
-    )
-    mut_res_feat_dict, mut_atom_feat_dict = feature_alignment(
-        mut_selected_res, mut_selected_atom, mut_data, mut_res_dict2, mut_atom_dict, pdbpos2uniprotpos_dict, mut_pos
-    )
+        wild_res_dict2, wild_atom_dict = get_res_atom_dict(wild_pdb_array)
+        mut_res_dict2, mut_atom_dict = get_res_atom_dict(mut_pdb_array)
 
-    wild_pdb_array2, wild_res_index_pos_dict, wild_atom_index_pos = get_new_pdb_array(
-        wild_pdb_array, wild_res_feat_dict.keys(), wild_atom_feat_dict.keys()
-    )
-    mut_pdb_array2, mut_res_index_pos_dict, mut_atom_index_pos = get_new_pdb_array(
-        mut_pdb_array, mut_res_feat_dict.keys(), mut_atom_feat_dict.keys()
-    )
+        wild_res_feat_dict, wild_atom_feat_dict = feature_alignment(
+            wild_selected_res, wild_selected_atom, wild_data, wild_res_dict2, wild_atom_dict, pdbpos2uniprotpos_dict, mut_pos
+        )
+        mut_res_feat_dict, mut_atom_feat_dict = feature_alignment(
+            mut_selected_res, mut_selected_atom, mut_data, mut_res_dict2, mut_atom_dict, pdbpos2uniprotpos_dict, mut_pos
+        )
 
-    wild_res_edge_index, wild_res_edge_feature, wild_atom_res_index = get_edge().generate_res_edge_feature_postmut(
-        mut_pos, wild_pdb_array2)
-    mut_res_edge_index, mut_res_edge_feature, mut_atom_res_index = get_edge().generate_res_edge_feature_postmut(
-        mut_pos, mut_pdb_array2)
+        wild_pdb_array2, wild_res_index_pos_dict, wild_atom_index_pos = get_new_pdb_array(
+            wild_pdb_array, wild_res_feat_dict.keys(), wild_atom_feat_dict.keys()
+        )
+        mut_pdb_array2, mut_res_index_pos_dict, mut_atom_index_pos = get_new_pdb_array(
+            mut_pdb_array, mut_res_feat_dict.keys(), mut_atom_feat_dict.keys()
+        )
 
-    wild_atom_edge_index, wild_atom_edge_feature = get_edge().generate_atom_edge_feature(wild_pdb_array2)
-    mut_atom_edge_index, mut_atom_edge_feature = get_edge().generate_atom_edge_feature(mut_pdb_array2)
+        wild_res_edge_index, wild_res_edge_feature, wild_atom_res_index = get_edge().generate_res_edge_feature_postmut(
+            mut_pos, wild_pdb_array2)
+        mut_res_edge_index, mut_res_edge_feature, mut_atom_res_index = get_edge().generate_res_edge_feature_postmut(
+            mut_pos, mut_pdb_array2)
 
-    wild_res_node_feat = generate_node_feature(wild_res_feat_dict, wild_res_index_pos_dict, 105)
-    mut_res_node_feat = generate_node_feature(mut_res_feat_dict, mut_res_index_pos_dict, 105)
+        wild_atom_edge_index, wild_atom_edge_feature = get_edge().generate_atom_edge_feature(wild_pdb_array2)
+        mut_atom_edge_index, mut_atom_edge_feature = get_edge().generate_atom_edge_feature(mut_pdb_array2)
 
-    wild_atom_node_feat = generate_node_feature(wild_atom_feat_dict, wild_atom_index_pos, 5)
-    mut_atom_node_feat = generate_node_feature(mut_atom_feat_dict, mut_atom_index_pos, 5)
+        wild_res_node_feat = generate_node_feature(wild_res_feat_dict, wild_res_index_pos_dict, 105)
+        mut_res_node_feat = generate_node_feature(mut_res_feat_dict, mut_res_index_pos_dict, 105)
 
-    wild_mb_data = get_esm2(wild_prot_id, wild_res_index_pos_dict, pdbpos2uniprotpos_dict, esm_dir)
-    mut_mb_data = get_esm2(mut_prot_id, mut_res_index_pos_dict, pdbpos2uniprotpos_dict, esm_dir)
+        wild_atom_node_feat = generate_node_feature(wild_atom_feat_dict, wild_atom_index_pos, 5)
+        mut_atom_node_feat = generate_node_feature(mut_atom_feat_dict, mut_atom_index_pos, 5)
 
-    res_node_wt_path = f'{input_dir}/{struct_id}_RN_wt.npy'
-    res_edge_wt_path = f'{input_dir}/{struct_id}_RE_wt.npy'
-    res_edge_index_wt_path = f'{input_dir}/{struct_id}_REI_wt.npy'
-    atom_node_wt_path = f'{input_dir}/{struct_id}_AN_wt.npy'
-    atom_edge_wt_path = f'{input_dir}/{struct_id}_AE_wt.npy'
-    atoms_edge_index_wt_path = f'{input_dir}/{struct_id}_AEI_wt.npy'
-    atom2res_index_wt_path = f'{input_dir}/{struct_id}_I_wt.npy'
-    extra_feat_wt_path = f'{input_dir}/{struct_id}_EF_wt.npy'
+        wild_mb_data = get_esm2(wild_prot_id, wild_res_index_pos_dict, pdbpos2uniprotpos_dict, esm_dir)
+        mut_mb_data = get_esm2(mut_prot_id, mut_res_index_pos_dict, pdbpos2uniprotpos_dict, esm_dir)
 
-    res_node_mt_path = f'{input_dir}/{struct_id}_RN_mt.npy'
-    res_edge_mt_path = f'{input_dir}/{struct_id}_RE_mt.npy'
-    res_edge_index_mt_path = f'{input_dir}/{struct_id}_REI_mt.npy'
-    atom_node_mt_path = f'{input_dir}/{struct_id}_AN_mt.npy'
-    atom_edge_mt_path = f'{input_dir}/{struct_id}_AE_mt.npy'
-    atom_edge_index_mt_path = f'{input_dir}/{struct_id}_AEI_mt.npy'
-    atom2res_index_mt_path = f'{input_dir}/{struct_id}_I_mt.npy'
-    extra_feat_mt_path = f'{input_dir}/{struct_id}_EF_mt.npy'
+        # Save arrays
+        np.save(f'{input_dir}/{struct_id}_RN_wt.npy', wild_res_node_feat)
+        np.save(f'{input_dir}/{struct_id}_RE_wt.npy', wild_res_edge_feature)
+        np.save(f'{input_dir}/{struct_id}_REI_wt.npy', wild_res_edge_index)
+        np.save(f'{input_dir}/{struct_id}_AN_wt.npy', wild_atom_node_feat)
+        np.save(f'{input_dir}/{struct_id}_AE_wt.npy', wild_atom_edge_feature)
+        np.save(f'{input_dir}/{struct_id}_AEI_wt.npy', wild_atom_edge_index)
+        np.save(f'{input_dir}/{struct_id}_I_wt.npy', wild_atom_res_index)
+        np.save(f'{input_dir}/{struct_id}_EF_wt.npy', wild_mb_data)
 
-    np.save(res_node_wt_path, wild_res_node_feat)
-    np.save(res_edge_wt_path, wild_res_edge_feature)
-    np.save(res_edge_index_wt_path, wild_res_edge_index)
-    np.save(atom_node_wt_path, wild_atom_node_feat)
-    np.save(atom_edge_wt_path, wild_atom_edge_feature)
-    np.save(atoms_edge_index_wt_path, wild_atom_edge_index)
-    np.save(atom2res_index_wt_path, wild_atom_res_index)
-    np.save(extra_feat_wt_path, wild_mb_data)
+        np.save(f'{input_dir}/{struct_id}_RN_mt.npy', mut_res_node_feat)
+        np.save(f'{input_dir}/{struct_id}_RE_mt.npy', mut_res_edge_feature)
+        np.save(f'{input_dir}/{struct_id}_REI_mt.npy', mut_res_edge_index)
+        np.save(f'{input_dir}/{struct_id}_AN_mt.npy', mut_atom_node_feat)
+        np.save(f'{input_dir}/{struct_id}_AE_mt.npy', mut_atom_edge_feature)
+        np.save(f'{input_dir}/{struct_id}_AEI_mt.npy', mut_atom_edge_index)
+        np.save(f'{input_dir}/{struct_id}_I_mt.npy', mut_atom_res_index)
+        np.save(f'{input_dir}/{struct_id}_EF_mt.npy', mut_mb_data)
 
-    np.save(res_node_mt_path, mut_res_node_feat)
-    np.save(res_edge_mt_path, mut_res_edge_feature)
-    np.save(res_edge_index_mt_path, mut_res_edge_index)
-    np.save(atom_node_mt_path, mut_atom_node_feat)
-    np.save(atom_edge_mt_path, mut_atom_edge_feature)
-    np.save(atom_edge_index_mt_path, mut_atom_edge_index)
-    np.save(atom2res_index_mt_path, mut_atom_res_index)
-    np.save(extra_feat_mt_path, mut_mb_data)
+    except Exception as e:
+        # Write guaranteed placeholder input arrays and continue.
+        print(
+            f"[assemble-fallback] WARNING: assemble failed for struct_id={struct_id} "
+            f"(pdb={pdb_id} chain={chain_id} mut_pos={mut_pos} {wild_type}/{mutant}). "
+            f"Writing fallback input/*.npy. Error: {e}",
+            file=sys.stderr,
+            flush=True,
+        )
+        print(traceback.format_exc(), file=sys.stderr, flush=True)
+        _write_fallback_inputs(input_dir, struct_id, mut_index=8)
+        return
 
 
 def main():
