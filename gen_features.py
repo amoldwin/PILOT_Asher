@@ -3,6 +3,9 @@ import argparse
 import numpy as np
 import torch
 import shutil
+import sys
+import traceback
+
 from feature_generators.gen_pdb import gen_all_pdb
 from feature_generators.gen_fasta import gen_all_fasta
 from feature_generators.SASA import use_naccess, use_freesasa, calc_SASA
@@ -119,7 +122,6 @@ def gen_features(
     """
     row_pdb_dir, cleaned_pdb_dir, fasta_dir, pssm_dir, msa_dir, hhm_dir, sasa_dir, esm_dir, input_dir = _ensure_dirs(dir)
 
-    # Base (unsuffixed) ids used only for printing / struct_id naming
     pdb_chain = pdb_id + '_' + chain_id
     seq_id = pdb_id + '_' + chain_id + '_' + wild_type + mut_pos + mutant
     struct_id = seq_id + '__' + mutator_backend
@@ -140,7 +142,6 @@ def gen_features(
     )
     struct_id = mut_id_from_pdb
 
-    # IMPORTANT (suffix mode B): FASTA naming matches row_pdb_suffix, and we derive all downstream IDs from FASTA basenames.
     wild_fasta, mut_fasta, wild_seq, mut_seq, pdb_positions, pdbpos2uniprotpos_dict = gen_all_fasta(
         pdb_id, chain_id, mut_pos, wild_type, mutant,
         cleaned_pdb_dir, fasta_dir,
@@ -150,7 +151,6 @@ def gen_features(
         fasta_suffix=row_pdb_suffix,
     )
 
-    # These become the canonical IDs for sequence-derived features (pssm/rawmsa/msa/hhm/esm)
     wild_prot_id = os.path.basename(wild_fasta).split('.')[0]
     mut_prot_id = os.path.basename(mut_fasta).split('.')[0]
 
@@ -162,12 +162,8 @@ def gen_features(
     do_msa = step in ['all', 'precompute', 'precompute_psiblast_msa']
     do_hhblits = step in ['all', 'precompute', 'precompute_hhblits']
 
-    # -------------------------
-    # PRECOMPUTE
-    # -------------------------
     if step in ['all', 'precompute', 'precompute_psiblast_msa', 'precompute_hhblits']:
 
-        # SASA files are keyed by PDB basename (WT uses wild_pdb basename; mutant uses struct_id naming in gen_features)
         if do_sasa:
             if sasa_backend.lower() == 'freesasa':
                 print('Using FreeSASA ...')
@@ -194,13 +190,11 @@ def gen_features(
                     if not _nonempty(mut_fasa):
                         shutil.copyfile(wild_fasa, mut_fasa)
 
-        # PSI-BLAST: outputs keyed by FASTA basename => rawmsa_pssm/{prot_id}.(rawmsa|pssm)
         if do_psiblast:
             print('Using psiblast ...')
             wild_frawmsa, wild_fpssm = use_psiblast(wild_fasta, pssm_dir, psi_path, uniref90_path)
             mut_frawmsa, mut_fpssm = use_psiblast(mut_fasta, pssm_dir, psi_path, uniref90_path)
 
-        # MSA: outputs keyed by prot_id => msa/{prot_id}.msa
         if do_msa:
             print('Generating MSA files ...')
             wild_frawmsa = os.path.join(pssm_dir, f'{wild_prot_id}.rawmsa')
@@ -208,7 +202,6 @@ def gen_features(
             _ = gen_msa(wild_prot_id, wild_seq, wild_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
             _ = gen_msa(mut_prot_id, mut_seq, mut_frawmsa, msa_dir, clustalo_path, blastdbcmd_path, uniref90_path)
 
-        # HHblits: outputs keyed by prot_id => hhm/{prot_id}.hhm
         if do_hhblits:
             print('Using hhblits ...')
             _ = use_hhblits(wild_prot_id, wild_fasta, hhblits_path, uniRef30_path, hhm_dir)
@@ -217,9 +210,6 @@ def gen_features(
         if step in ['precompute', 'precompute_psiblast_msa', 'precompute_hhblits']:
             return
 
-    # -------------------------
-    # ESM2
-    # -------------------------
     if step in ['all', 'esm2']:
         print('Using esm2 ...')
         use_esm2(wild_fasta, wild_prot_id, esm_dir)
@@ -227,12 +217,8 @@ def gen_features(
         if step == 'esm2':
             return
 
-    # -------------------------
-    # ASSEMBLE
-    # -------------------------
     print('Assembling features ...')
 
-    # SASA outputs are based on pdb basenames from use_freesasa/use_naccess
     wild_pdb_name = os.path.basename(wild_pdb).split('.')[0]
     wild_rsa = os.path.join(sasa_dir, f'{wild_pdb_name}.rsa')
     wild_asa = os.path.join(sasa_dir, f'{wild_pdb_name}.asa')
@@ -265,7 +251,6 @@ def gen_features(
     wild_depth = calc_depth(wild_pdb, chain_id)
     mut_depth = calc_depth(mut_pdb if mutated_by_structure else wild_pdb, chain_id)
 
-    # PSSM/HHM/MSA are keyed by FASTA basenames
     wild_fpssm = os.path.join(pssm_dir, f'{wild_prot_id}.pssm')
     mut_fpssm = os.path.join(pssm_dir, f'{mut_prot_id}.pssm')
     if not os.path.exists(wild_fpssm) or not os.path.exists(mut_fpssm):
@@ -358,11 +343,9 @@ def gen_features(
     wild_atom_node_feat = generate_node_feature(wild_atom_feat_dict, wild_atom_index_pos, 5)
     mut_atom_node_feat = generate_node_feature(mut_atom_feat_dict, mut_atom_index_pos, 5)
 
-    # ESM2 .pt files are keyed by FASTA basenames
     wild_mb_data = get_esm2(wild_prot_id, wild_res_index_pos_dict, pdbpos2uniprotpos_dict, esm_dir)
     mut_mb_data = get_esm2(mut_prot_id, mut_res_index_pos_dict, pdbpos2uniprotpos_dict, esm_dir)
 
-    # Save inputs (structure-dependent -> struct_id)
     res_node_wt_path = f'{input_dir}/{struct_id}_RN_wt.npy'
     res_edge_wt_path = f'{input_dir}/{struct_id}_RE_wt.npy'
     res_edge_index_wt_path = f'{input_dir}/{struct_id}_REI_wt.npy'
@@ -432,6 +415,10 @@ def main():
     parser.add_argument('--row-pdb-suffix', dest='row_pdb_suffix', default='',
                         help="Optional suffix appended before .pdb for row_pdb and cleaned_pdb WT files (e.g. '_esmfold').")
 
+    # NEW: keep going on per-mutation failures
+    parser.add_argument('--continue-on-error', dest='continue_on_error', action='store_true',
+                        help='If set, failures for one mutation are printed to stderr and the script continues.')
+
     args = parser.parse_args()
 
     global freesasa_path
@@ -454,15 +441,37 @@ def main():
                 raise ValueError(f'Malformed amino_acid field at {args.mutant_list}:{lnum}: expected like H/S, got {aa_field!r}')
             wild_type = aa_field[0]
             mutant = aa_field[-1]
-            gen_features(
-                pdb_id, chain_id, mut_pos, wild_type, mutant, args.dir,
-                sasa_backend=args.sasa_backend,
-                step=args.step,
-                mutator_backend=args.mutator_backend,
-                skip_pdb_download=args.skip_pdb_download,
-                row_pdb_name_mode=args.row_pdb_name_mode,
-                row_pdb_suffix=args.row_pdb_suffix,
-            )
+
+            if not args.continue_on_error:
+                gen_features(
+                    pdb_id, chain_id, mut_pos, wild_type, mutant, args.dir,
+                    sasa_backend=args.sasa_backend,
+                    step=args.step,
+                    mutator_backend=args.mutator_backend,
+                    skip_pdb_download=args.skip_pdb_download,
+                    row_pdb_name_mode=args.row_pdb_name_mode,
+                    row_pdb_suffix=args.row_pdb_suffix,
+                )
+            else:
+                try:
+                    gen_features(
+                        pdb_id, chain_id, mut_pos, wild_type, mutant, args.dir,
+                        sasa_backend=args.sasa_backend,
+                        step=args.step,
+                        mutator_backend=args.mutator_backend,
+                        skip_pdb_download=args.skip_pdb_download,
+                        row_pdb_name_mode=args.row_pdb_name_mode,
+                        row_pdb_suffix=args.row_pdb_suffix,
+                    )
+                except Exception as e:
+                    header = (
+                        f"[ERROR] line={lnum} mut='{pdb_id} {chain_id} {mut_pos} {wild_type}/{mutant}' "
+                        f"step={args.step} backend={args.mutator_backend} suffix={args.row_pdb_suffix!r} name_mode={args.row_pdb_name_mode}"
+                    )
+                    print(header, file=sys.stderr, flush=True)
+                    print(str(e), file=sys.stderr, flush=True)
+                    print(traceback.format_exc(), file=sys.stderr, flush=True)
+                    # continue to next line
 
 
 if __name__ == "__main__":

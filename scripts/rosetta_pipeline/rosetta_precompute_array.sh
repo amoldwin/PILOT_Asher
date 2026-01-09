@@ -15,7 +15,7 @@
 # IMPORTANT:
 # Do NOT hardcode --array here; set it at submit-time:
 #   sbatch --array=0-999 scripts/rosetta_precompute_array.sh MUT_LIST FEATURE_DIR [SASA_BACKEND]
-##sbatch --array=0-4916 scripts/rosetta_pipeline/rosetta_precompute_array.sh dataset/mutation_list_dTm.txt /scratch/amoldwin/datasets/PILOT_dTm/ freesasa   --row-pdb-name-mode pdb_chain --row-pdb-suffix _esmfold
+##sbatch --array=0-4916 scripts/rosetta_pipeline/rosetta_precompute_array.sh dataset/mutation_list_dTm.txt /scratch/amoldwin/datasets/PILOT_dTm_esmfold/ freesasa   
 set -euo pipefail
 
 MUT_LIST=${1:?Usage: sbatch --array=0-N scripts/rosetta_precompute_array.sh MUT_LIST FEATURE_DIR [SASA_BACKEND]}
@@ -61,4 +61,6 @@ python gen_features.py \
   --sasa-backend "${SASA_BACKEND}" \
   --mutator-backend rosetta \
   --rosetta-scripts-path rosetta_scripts.static.linuxgccrelease \
-  --skip-pdb-download
+  --skip-pdb-download \
+  --row-pdb-name-mode pdb_chain \
+  --continue-on-error

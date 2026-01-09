@@ -21,8 +21,9 @@ FEATURE_DIR=${2:?Usage: sbatch --array=0-9 scripts/esm2_array.sh MUT_LIST FEATUR
 
 
 ##sbatch --array=0-9 scripts/esm2_array.sh dataset/mutation_list_test.txt /scratch/amoldwin/datasets/PILOT
-##python gen_features.py -i dataset/mutation_list_filtered.txt -d /scratch/amoldwin/datasets/PILOT_dTm \
-  -s esm2 --mutator-backend proxy --skip-pdb-download --row-pdb-name-mode pdb_chain --row-pdb-suffix _esmfold
+##sbatch --array=0-9 scripts/esm2_array.sh dataset/mutation_list_dTm.txt /scratch/amoldwin/datasets/PILOT_dTm_esmfold
+## python gen_features.py -i dataset/mutation_list_filtered.txt -d /scratch/amoldwin/datasets/PILOT_dTm \
+##   -s esm2 --mutator-backend proxy --skip-pdb-download --row-pdb-name-mode pdb_chain 
 # Robust conda activation (batch-safe)
 source ~/PROJECTS/miniconda/etc/profile.d/conda.sh
 conda activate pilot
@@ -52,5 +53,8 @@ for ((i=TASK_ID; i<N; i+=NTASKS)); do
   python gen_features.py \
     -i <(echo "${LINE}") \
     -d "${FEATURE_DIR}" \
-    -s esm2
+    -s esm2 \
+    --skip-pdb-download \
+    --row-pdb-name-mode pdb_chain
+    
 done
