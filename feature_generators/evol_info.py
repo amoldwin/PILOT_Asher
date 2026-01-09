@@ -465,28 +465,69 @@ def gen_msa(prot_id, prot_seq, rawmsa_file, output_dir, clustalo_path, blastdbcm
 def use_hhblits(seq_name, fasta_file, hhblits_path, uniRef30_path, hhm_dir, cpu: int = 16):
     """
     Run hhblits and generate {hhm_dir}/{seq_name}.hhm
+
+    Safe for SLURM arrays: uses a per-seq lock and atomic write to avoid corrupted/truncated HHM files.
     """
     os.makedirs(hhm_dir, exist_ok=True)
     out_hhm = os.path.join(hhm_dir, seq_name + ".hhm")
-    if os.path.exists(out_hhm):
+
+    # Fast path
+    if _nonempty(out_hhm):
         return out_hhm
 
-    threads = _slurm_cpus(cpu)
-
-    cmd = [hhblits_path, "-cpu", str(threads), "-i", fasta_file, "-d", uniRef30_path, "-ohhm", out_hhm]
+    lock_path = os.path.join(hhm_dir, f".{seq_name}.hhblits.lock")
+    _acquire_lock(lock_path)
     try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            f"hhblits failed for {fasta_file} with db={uniRef30_path}\n"
-            f"Command: {' '.join(cmd)}\n"
-            f"stdout:\n{e.stdout}\n\nstderr:\n{e.stderr}\n"
-        ) from e
+        # Re-check after waiting
+        if _nonempty(out_hhm):
+            return out_hhm
 
-    if not os.path.exists(out_hhm):
-        raise FileNotFoundError(f"hhblits did not create hhm file: {out_hhm}")
+        # Remove stale zero-byte output
+        if os.path.exists(out_hhm) and os.path.getsize(out_hhm) == 0:
+            try:
+                os.remove(out_hhm)
+            except OSError:
+                pass
 
-    return out_hhm
+        threads = _slurm_cpus(cpu)
+
+        # Write to temp then atomically move into place
+        tmp_hhm = out_hhm + f".tmp_{os.getpid()}"
+        try:
+            if os.path.exists(tmp_hhm):
+                os.remove(tmp_hhm)
+        except OSError:
+            pass
+
+        cmd = [hhblits_path, "-cpu", str(threads), "-i", fasta_file, "-d", uniRef30_path, "-ohhm", tmp_hhm]
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        except subprocess.CalledProcessError as e:
+            try:
+                if os.path.exists(tmp_hhm):
+                    os.remove(tmp_hhm)
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"hhblits failed for {fasta_file} with db={uniRef30_path}\n"
+                f"Command: {' '.join(cmd)}\n"
+                f"stdout:\n{e.stdout}\n\nstderr:\n{e.stderr}\n"
+            ) from e
+
+        if not _nonempty(tmp_hhm):
+            raise FileNotFoundError(f"hhblits did not create hhm file: {tmp_hhm}")
+
+        os.replace(tmp_hhm, out_hhm)
+        return out_hhm
+    finally:
+        # cleanup temp (best-effort) + unlock
+        try:
+            tmp_hhm = out_hhm + f".tmp_{os.getpid()}"
+            if os.path.exists(tmp_hhm):
+                os.remove(tmp_hhm)
+        except OSError:
+            pass
+        _release_lock(lock_path)
 
 
 # -------------------------
@@ -565,7 +606,6 @@ def process_hhm(path, expected_len: int | None = None):
                 try:
                     v = 9999.0 if j == "*" else float(j)
                 except ValueError:
-                    # malformed token like 'F'
                     print(f"[process_hhm] WARNING: non-numeric token {j!r} in {path}; using zeros.", flush=True)
                     return _fallback()
                 feature[axis_x][axis_y] = v / 10000.0
