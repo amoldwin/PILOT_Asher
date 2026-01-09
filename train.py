@@ -35,6 +35,11 @@ def mut_id_from_row(pdb: str, chain: str, mut_pos: str, residue_field: str):
     return f"{pdb}_{chain}_{wt}{mut_pos}{mt}", wt, mt
 
 
+def struct_id_from_row(pdb: str, chain: str, mut_pos: str, residue_field: str, mutator_backend: str):
+    mut_id, wt, mt = mut_id_from_row(pdb, chain, mut_pos, residue_field)
+    return f"{mut_id}__{mutator_backend}", wt, mt
+
+
 # RN feature sub-blocks (from feature_alignment.py)
 RN_PSSM = slice(32, 52)
 RN_HHM = slice(52, 82)
@@ -208,6 +213,8 @@ class PilotNPYDataset(Dataset):
         max_warn_sanitize: int = 20,
         fallback: str = "warn",  # error|warn|silent
         fallback_mutation_index: str = "center",  # center|hash
+        mutator_backend: str = "foldx",
+        label_col: str = "exp.DDG",
     ):
         self.split_tsv = split_tsv
         self.input_dir = os.path.join(feature_dir, input_subdir)
@@ -230,19 +237,36 @@ class PilotNPYDataset(Dataset):
         self.missing_count = 0
         self.missing_mut_ids = missing_mut_ids
 
+        self.mutator_backend = mutator_backend
+        self.label_col = label_col
+
         self.rows: List[Tuple[str, str, str, str, float]] = []
+
         with open(split_tsv, "r") as f:
-            _header = f.readline()
+            header = f.readline().strip()
+            header_cols = header.split()
+            col_index = {c: i for i, c in enumerate(header_cols)}
+
+            required = ["PDB", "chain", "mut_pos", "residue", self.label_col]
+            missing_cols = [c for c in required if c not in col_index]
+            if missing_cols:
+                raise ValueError(
+                    f"Missing required columns in {split_tsv}: {missing_cols}. "
+                    f"Found columns: {header_cols}. "
+                    f"Use --label-col to set the label column name."
+                )
+
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 parts = line.split()
-                if len(parts) < 5:
-                    raise ValueError(f"Bad line in {split_tsv}: {line!r}")
-                pdb, chain, mut_pos, residue = parts[0], parts[1], parts[2], parts[3]
-                exp_ddg = float(parts[4])
-                self.rows.append((pdb, chain, mut_pos, residue, exp_ddg))
+                pdb = parts[col_index["PDB"]]
+                chain = parts[col_index["chain"]]
+                mut_pos = parts[col_index["mut_pos"]]
+                residue = parts[col_index["residue"]]
+                y = float(parts[col_index[self.label_col]])
+                self.rows.append((pdb, chain, mut_pos, residue, y))
 
     def __len__(self):
         return len(self.rows)
@@ -265,11 +289,11 @@ class PilotNPYDataset(Dataset):
             res_x[:, RN_MSA_CONS] = 0.0
         return res_x
 
-    def _load_one(self, mut_id: str, suffix: str, abl: Ablations) -> Tuple[Tuple[torch.Tensor, ...], bool, str]:
+    def _load_one(self, struct_id: str, suffix: str, abl: Ablations) -> Tuple[Tuple[torch.Tensor, ...], bool, str]:
         """
         Returns: (tensors_tuple, used_fallback, fallback_reason)
         """
-        base = os.path.join(self.input_dir, f"{mut_id}_")
+        base = os.path.join(self.input_dir, f"{struct_id}_")
 
         paths = {
             "RN": base + f"RN_{suffix}.npy",
@@ -288,13 +312,13 @@ class PilotNPYDataset(Dataset):
 
         if missing:
             if self.fallback == "error":
-                raise FileNotFoundError(f"Missing {missing} for {mut_id} {suffix}")
+                raise FileNotFoundError(f"Missing {missing} for {struct_id} {suffix}")
             used_fallback = True
             fallback_reason = f"missing_files:{','.join(missing)}"
             self.fallback_count += 1
 
-            mi = _fallback_mut_index(mut_id, self.fallback_mutation_index)
-            rn, re, rei, an, ae, aei, index, ef = make_fallback_inputs(mut_id, suffix, mut_index=mi)
+            mi = _fallback_mut_index(struct_id, self.fallback_mutation_index)
+            rn, re, rei, an, ae, aei, index, ef = make_fallback_inputs(struct_id, suffix, mut_index=mi)
         else:
             rn = np.load(paths["RN"]).astype(float)
             re = np.load(paths["RE"]).astype(float)
@@ -308,7 +332,7 @@ class PilotNPYDataset(Dataset):
             ef = np.load(paths["EF"]).astype(float)
 
             if not _validate_index_list(index, n_atoms=an.shape[0]):
-                raise ValueError(f"Bad atom->res index list for {mut_id} {suffix}: shape={index.shape} n_atoms={an.shape[0]}")
+                raise ValueError(f"Bad atom->res index list for {struct_id} {suffix}: shape={index.shape} n_atoms={an.shape[0]}")
 
             # preprocessing identical to predict.py
             rn[:, :-1] = Standardization(rn[:, :-1])
@@ -325,7 +349,7 @@ class PilotNPYDataset(Dataset):
                 self.sanitized_values += fixed
                 if fixed and self.warn_sanitize and self._warned_sanitize < self.max_warn_sanitize:
                     self._warned_sanitize += 1
-                    warnings.warn(f"[PilotNPYDataset] Sanitized {fixed} non-finite values for mut_id={mut_id} ({suffix}).")
+                    warnings.warn(f"[PilotNPYDataset] Sanitized {fixed} non-finite values for struct_id={struct_id} ({suffix}).")
                     if self._warned_sanitize == self.max_warn_sanitize:
                         warnings.warn("[PilotNPYDataset] Reached max_warn_sanitize; suppressing further sanitize warnings.")
 
@@ -343,7 +367,7 @@ class PilotNPYDataset(Dataset):
         # If we used fallback, optionally warn (once-ish)
         if used_fallback and self.fallback == "warn" and self._warned_missing < self.max_warn_missing:
             self._warned_missing += 1
-            warnings.warn(f"[PilotNPYDataset] Using fallback inputs for mut_id={mut_id} {suffix} ({fallback_reason})")
+            warnings.warn(f"[PilotNPYDataset] Using fallback inputs for struct_id={struct_id} {suffix} ({fallback_reason})")
             if self._warned_missing == self.max_warn_missing:
                 warnings.warn("[PilotNPYDataset] Reached max_warn_missing; suppressing further fallback warnings.")
 
@@ -361,12 +385,13 @@ class PilotNPYDataset(Dataset):
 
     def __getitem__(self, idx):
         pdb, chain, mut_pos, residue, y = self.rows[idx]
+        struct_id, _, _ = struct_id_from_row(pdb, chain, mut_pos, residue, mutator_backend=self.mutator_backend)
         mut_id, _, _ = mut_id_from_row(pdb, chain, mut_pos, residue)
         abl: Ablations = getattr(self, "_ablations", Ablations())
 
         try:
-            wt_tensors, wt_fb, wt_reason = self._load_one(mut_id, "wt", abl)
-            mt_tensors, mt_fb, mt_reason = self._load_one(mut_id, "mt", abl)
+            wt_tensors, wt_fb, wt_reason = self._load_one(struct_id, "wt", abl)
+            mt_tensors, mt_fb, mt_reason = self._load_one(struct_id, "mt", abl)
         except (FileNotFoundError, ValueError) as e:
             # With fallback enabled, this should be rare (bad index list, etc.)
             self.missing_count += 1
@@ -386,6 +411,9 @@ class PilotNPYDataset(Dataset):
             "mut_pos": mut_pos,
             "residue": residue,
             "mut_id": mut_id,
+            "struct_id": struct_id,
+            "mutator_backend": self.mutator_backend,
+            "label_col": self.label_col,
             "used_fallback": bool(wt_fb or mt_fb),
             "fallback_reason": ";".join([r for r in [wt_reason, mt_reason] if r]),
         }
@@ -548,6 +576,9 @@ def evaluate_and_collect(model, loader, device):
             "exp.DDG": y_val,
             "pred.DDG": p_val,
             "mut_id": meta["mut_id"],
+            "struct_id": meta["struct_id"],
+            "mutator_backend": meta["mutator_backend"],
+            "label_col": meta.get("label_col", "exp.DDG"),
             "used_fallback": int(meta.get("used_fallback", False)),
             "fallback_reason": meta.get("fallback_reason", ""),
         })
@@ -573,7 +604,8 @@ def evaluate_and_collect(model, loader, device):
 def write_csv(path: str, rows: List[Dict[str, Any]]):
     import csv
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    fieldnames = ["PDB", "chain", "mut_pos", "residue", "exp.DDG", "pred.DDG", "mut_id", "used_fallback", "fallback_reason"]
+    fieldnames = ["PDB", "chain", "mut_pos", "residue", "exp.DDG", "pred.DDG",
+                  "mut_id", "struct_id", "mutator_backend", "label_col", "used_fallback", "fallback_reason"]
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
@@ -632,6 +664,12 @@ def main():
     ap.add_argument("--out-dir", default="runs")
     ap.add_argument("--write-missing", default=None)
     ap.add_argument("--max-warn-missing", type=int, default=20)
+
+    ap.add_argument("--mutator-backend", default="foldx", choices=["foldx", "proxy", "rosetta"],
+                    help="Backend used to generate input/*.npy files (affects struct_id naming).")
+
+    ap.add_argument("--label-col", default="exp.DDG",
+                    help="Column name in --train/--test TSV to use as regression target (default: exp.DDG).")
 
     # validation split: by PDB
     ap.add_argument("--val-frac", type=float, default=0.10, help="Fraction of TRAIN PDBs held out for validation.")
@@ -697,6 +735,8 @@ def main():
     print(f"fallback      : {args.fallback} (mut_index={args.fallback_mutation_index})", flush=True)
     print(f"ablations     : {ablation_tag(ablations)}", flush=True)
     print(f"val_frac      : {args.val_frac}", flush=True)
+    print(f"mutator_backend: {args.mutator_backend}", flush=True)
+    print(f"label_col     : {args.label_col}", flush=True)
     print("=" * 88, flush=True)
 
     missing_mut_ids: Set[str] = set()
@@ -710,6 +750,8 @@ def main():
         max_warn_sanitize=args.max_warn_sanitize,
         fallback=args.fallback,
         fallback_mutation_index=args.fallback_mutation_index,
+        mutator_backend=args.mutator_backend,
+        label_col=args.label_col,
     )
     test_ds = PilotNPYDataset(
         args.test, args.feature_dir,
@@ -719,6 +761,8 @@ def main():
         max_warn_sanitize=args.max_warn_sanitize,
         fallback=args.fallback,
         fallback_mutation_index=args.fallback_mutation_index,
+        mutator_backend=args.mutator_backend,
+        label_col=args.label_col,
     )
     print(f"[data] Train rows (pre-split): {len(train_all)} | Test rows: {len(test_ds)}", flush=True)
 
@@ -790,6 +834,8 @@ def main():
                 "val_pdbs": va_pdbs,
                 "fallback": args.fallback,
                 "fallback_mutation_index": args.fallback_mutation_index,
+                "mutator_backend": args.mutator_backend,
+                "label_col": args.label_col,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optim.state_dict(),
                 "metrics_val": va_metrics,
@@ -812,6 +858,8 @@ def main():
                     "val_pdbs": va_pdbs,
                     "fallback": args.fallback,
                     "fallback_mutation_index": args.fallback_mutation_index,
+                    "mutator_backend": args.mutator_backend,
+                    "label_col": args.label_col,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optim.state_dict(),
                     "metrics_val": va_metrics,

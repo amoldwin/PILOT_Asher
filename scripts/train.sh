@@ -19,6 +19,15 @@ conda activate pilot
 export TORCH_HOME=/scratch/amoldwin/torch_cache
 
 
+## python train.py --train dataset/training_set_filtered.txt \
+##   --test dataset/test_set.txt \
+##   --feature-dir /scratch/amoldwin/datasets/PILOT \
+##   --job-id ddg_$SLURM_JOB_ID \
+##   --seed 123 \
+##   --epochs 30 \
+##   --lr 1e-4 \
+##   --out-dir runs
+
 python train.py --train dataset/training_set_filtered.txt \
   --test dataset/test_set.txt \
   --feature-dir /scratch/amoldwin/datasets/PILOT \
@@ -26,4 +35,6 @@ python train.py --train dataset/training_set_filtered.txt \
   --seed 123 \
   --epochs 30 \
   --lr 1e-4 \
-  --out-dir runs
+  --out-dir runs \
+  --mutator-backend rosetta \
+  --label-col rosetta
