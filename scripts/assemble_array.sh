@@ -18,7 +18,7 @@
 #
 # Usage:
 #   sbatch --array=0-$((N-1))%MAX_PARALLEL scripts/assemble_array.sh MUT_LIST FEATURE_DIR N [MAX_PARALLEL]
-#sbatch --dependency=afterany:5289062 --array=0-$((4917-1))%50  scripts/assemble_array.sh dataset/mutation_list_dTm.txt /scratch/amoldwin/datasets/PILOT_dTm_esmfold 4917 50
+#sbatch --dependency=afterany:5289062 --array=0-$((4917-1))  scripts/assemble_array.sh dataset/mutation_list_dTm.txt /scratch/amoldwin/datasets/PILOT_dTm_esmfold 4917 
 #
 # Example:
 #   N=$(grep -vE '^\s*(#|$)' dataset/mutation_list_filtered.txt | wc -l)
