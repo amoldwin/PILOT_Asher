@@ -149,6 +149,8 @@ def gen_features(
     skip_pdb_download: bool = False,
     row_pdb_name_mode: str = "pdb",
     row_pdb_suffix: str = "",
+    skip_blast=False,
+    skip_hhblits=False,
 ):
     """
     step: one of
@@ -205,7 +207,10 @@ def gen_features(
     do_psiblast = step in ['all', 'precompute', 'precompute_psiblast_msa']
     do_msa = step in ['all', 'precompute', 'precompute_psiblast_msa']
     do_hhblits = step in ['all', 'precompute', 'precompute_hhblits']
-
+    if skip_blast:
+        do_psiblast=False
+    if skip_hhblits:
+        do_hhblits=False
     if step in ['all', 'precompute', 'precompute_psiblast_msa', 'precompute_hhblits']:
 
         if do_sasa:
@@ -452,7 +457,10 @@ def main():
 
     parser.add_argument('--skip-pdb-download', dest='skip_pdb_download', action='store_true',
                         help='Do not download PDBs from RCSB. Require FEATURE_DIR/row_pdb files to already exist.')
-
+    parser.add_argument('--skip-blast', dest='skip_blast', action='store_true',
+                        help='Do not do blast.')
+    parser.add_argument('--skip-hhblits', dest='skip_hhblits', action='store_true',
+                        help='Do not do hhblits.')
     parser.add_argument('--row-pdb-name-mode', dest='row_pdb_name_mode', default='pdb',
                         choices=['pdb', 'pdb_chain'],
                         help='How to name row_pdb inputs: {pdb_id}.pdb or {pdb_id}_{chain_id}.pdb.')
@@ -494,6 +502,8 @@ def main():
                     skip_pdb_download=args.skip_pdb_download,
                     row_pdb_name_mode=args.row_pdb_name_mode,
                     row_pdb_suffix=args.row_pdb_suffix,
+                    skip_hhblits=args.skip_hhblits,
+                    skip_blast=args.skip_blast,
                 )
             else:
                 try:
@@ -505,6 +515,8 @@ def main():
                         skip_pdb_download=args.skip_pdb_download,
                         row_pdb_name_mode=args.row_pdb_name_mode,
                         row_pdb_suffix=args.row_pdb_suffix,
+                        skip_hhblits=args.skip_hhblits,
+                        skip_blast=args.skip_blast,
                     )
                 except Exception as e:
                     header = (
