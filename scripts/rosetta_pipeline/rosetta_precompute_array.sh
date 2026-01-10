@@ -60,7 +60,11 @@ python gen_features.py \
   -s precompute \
   --sasa-backend "${SASA_BACKEND}" \
   --mutator-backend rosetta \
-  --rosetta-scripts-path rosetta_scripts.static.linuxgccrelease \
+  --rosetta-scripts-path /opt/sw/other/apps/rosetta/3.13-mpi/main/source/bin/rosetta_scripts.static.linuxgccrelease \
   --skip-pdb-download \
   --row-pdb-name-mode pdb_chain \
   --continue-on-error
+
+
+
+## /opt/sw/other/apps/rosetta/3.13-mpi/main/source/bin/rosetta_scripts.static.linuxgccrelease  -in:file:s /scripts/amoldwin/datasets/PILOT_dTm_esmfold/1ARR_A.pdb   -parser:protocol /scratch/amoldwin/protocol.xml   -resfile /scratch/amoldwin/mutate.resfile   -nstruct 1   -out:pdb   -overwrite

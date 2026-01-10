@@ -29,9 +29,9 @@ hhblits_path = shutil.which('hhblits') or 'hhblits'
 freesasa_path = shutil.which('freesasa') or 'freesasa'
 
 uniref90_path = '/scratch/amoldwin/datasets/uniref90/uniref90'
-uniRef30_path = os.environ.get('HHBLITS_DB', './software/database/uniref30/UniRef30_2022_02')
+uniRef30_path = os.environ.get('HHBLITS_DB', '/scratch/amoldwin/datasets/Uniref30/UniRef30_2021_03')
 naccess_path = './software/naccess2.1.1/naccess'
-
+# python gen_features.py  -i variant.txt   -d /scratch/amoldwin/datasets/PILOT_dTm_esmfold   -s assemble   --mutator-backend rosetta   --rosetta-scripts-path /opt/sw/other/apps/rosetta/3.13-mpi/main/source/bin/rosetta_scripts.static.linuxgccrelease   --skip-pdb-download   --row-pdb-name-mode pdb_chain --continue-on-error
 
 def _nonempty(p: str) -> bool:
     try:
@@ -437,7 +437,7 @@ def main():
                         choices=['all', 'structures', 'precompute', 'precompute_psiblast_msa', 'precompute_hhblits',
                                  'esm2', 'assemble'],
                         help='Which pipeline step to run.')
-    parser.add_argument('--sasa-backend', dest='sasa_backend', type=str, default='naccess',
+    parser.add_argument('--sasa-backend', dest='sasa_backend', type=str, default='freesasa',
                         choices=['naccess', 'freesasa'], help='SASA backend to use.')
     parser.add_argument('--freesasa-path', dest='freesasa_path', type=str, default='freesasa',
                         help='Path to freesasa binary if not on PATH.')

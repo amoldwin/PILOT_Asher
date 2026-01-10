@@ -232,50 +232,36 @@ def _parse_mut_pos(mut_pos: str):
     return resnum, icode
 
 
-def _write_rosettascripts_xml(xml_path: str, chain_id: str, resnum: int, icode: str, mutant_aa: str, pack_radius: float = 8.0):
+def _write_rosettascripts_xml(
+    xml_path: str,
+    chain_id: str,
+    resnum: int,
+    icode: str,
+    mutant_aa: str,
+    pack_radius: float = 8.0,
+    resfile_path: str = None
+):
     """
-    NOTE: This XML is currently a placeholder in this branch of the repo.
-    If you plan to use rosetta backend, this should be replaced with a real RosettaScripts protocol.
+    Write a powerful RosettaScripts XML using FastRelax, backbone/sidechain movement,
+    and resfile-driven mutation, suitable for ddG prediction (Rosetta 3.13+).
     """
-    icode_str = icode if icode else ""
-    _ = f"{resnum}{icode_str}"
+    if resfile_path is None:
+        resfile_path = os.path.join(os.path.dirname(xml_path), "mutate.resfile")
+    resfile_path = os.path.abspath(resfile_path).replace("\\", "/")
     xml = f"""<ROSETTASCRIPTS>
   <SCOREFXNS>
     <ScoreFunction name="ref2015" weights="ref2015"/>
   </SCOREFXNS>
-
-  <RESIDUE_SELECTORS>
-    <Chain name="chain" chains="{chain_id}"/>
-    <ResidueIndex name="mutpos" resnums="{res_spec}"/>
-    <Neighborhood name="nbr" selector="mutpos" distance="{pack_radius}" include_focus_in_subset="true"/>
-    <And name="mut_in_chain" selectors="chain,mutpos"/>
-    <And name="nbr_in_chain" selectors="chain,nbr"/>
-  </RESIDUE_SELECTORS>
-
   <TASKOPERATIONS>
+    <ReadResfile name="rrf" filename="{resfile_path}"/>
     <InitializeFromCommandline name="init"/>
-    <IncludeCurrent name="ic"/>
-    <RestrictToRepacking name="repack_only"/>
-    <OperateOnResidueSubset name="prevent_repack_outside" selector="nbr_in_chain">
-      <RestrictToRepackingRLT/>
-    </OperateOnResidueSubset>
-    <OperateOnResidueSubset name="prevent_repack_elsewhere" selector="chain">
-      <RestrictToRepackingRLT/>
-    </OperateOnResidueSubset>
   </TASKOPERATIONS>
-
   <MOVERS>
-    <MutateResidue name="mutate" target="{res_spec}" new_res="{mutant_aa}"/>
-    <PackRotamersMover name="pack" scorefxn="ref2015" task_operations="init,ic"/>
-    <MinMover name="min" scorefxn="ref2015" type="lbfgs_armijo_nonmonotone" tolerance="0.0001" max_iter="200" bb="0" chi="1"/>
+    <FastRelax name="relax" scorefxn="ref2015" repeats="5" task_operations="rrf,init"/>
   </MOVERS>
-
   <PROTOCOLS>
-    <Add mover="mutate"/>
-    <Add mover="pack"/>
-    <Add mover="min"/>
+    <Add mover="relax"/>
   </PROTOCOLS>
-
   <OUTPUT scorefxn="ref2015"/>
 </ROSETTASCRIPTS>
 """
@@ -293,7 +279,9 @@ def gen_mut_pdb_rosetta(
     mut_id: str,
     rosetta_scripts_path: str = "rosetta_scripts.static.linuxgccrelease",
     pack_radius: float = 8.0,
+    nstruct: int = 5  # Number of decoys/outputs for robustness
 ):
+    import glob
     in_pdb = os.path.join(cleaned_pdb_dir, f"{pdb_id}_{chain_id}.pdb")
     out_pdb = os.path.join(cleaned_pdb_dir, f"{mut_id}.pdb")
 
@@ -315,8 +303,25 @@ def gen_mut_pdb_rosetta(
         resnum, icode = _parse_mut_pos(mut_pos)
 
         xml_path = os.path.join(workdir, "mutate_repack_minimize.xml")
-        _write_rosettascripts_xml(xml_path, chain_id=chain_id, resnum=resnum, icode=icode, mutant_aa=mutant, pack_radius=pack_radius)
+        resfile_path = os.path.join(workdir, "mutate.resfile")
 
+        # Write the resfile with correct header and mutation
+        with open(resfile_path, "w") as f:
+            f.write("NATRO\n")
+            f.write("start\n")
+            f.write(f"{resnum}{icode if icode else ''} {chain_id} PIKAA {mutant}\n")
+
+        _write_rosettascripts_xml(
+            xml_path,
+            chain_id=chain_id,
+            resnum=resnum,
+            icode=icode,
+            mutant_aa=mutant,
+            pack_radius=pack_radius,
+            resfile_path=resfile_path,
+        )
+
+        # Run Rosetta with multiple decoys for robustness (-nstruct N)
         cmd = [
             rosetta_scripts_path,
             "-s", in_pdb,
@@ -324,6 +329,7 @@ def gen_mut_pdb_rosetta(
             "-out:path:all", workdir,
             "-overwrite",
             "-mute", "all",
+            "-nstruct", str(nstruct)
         ]
 
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -337,20 +343,51 @@ def gen_mut_pdb_rosetta(
         if proc.returncode != 0:
             raise RuntimeError(f"RosettaScripts failed (exit={proc.returncode}). See {log_path}")
 
-        candidates = []
-        for fn in os.listdir(workdir):
-            if not fn.lower().endswith(".pdb"):
-                continue
-            full = os.path.join(workdir, fn)
-            if os.path.abspath(full) == os.path.abspath(in_pdb):
-                continue
-            candidates.append(full)
+        # Find all output PDBs (one per nstruct)
+        pdb_candidates = sorted(
+            glob.glob(os.path.join(workdir, "*.pdb")),
+            key=lambda p: os.path.getmtime(p)
+        )
+        pdb_candidates = [p for p in pdb_candidates if os.path.abspath(p) != os.path.abspath(in_pdb)]
 
-        if not candidates:
+        if not pdb_candidates:
             raise RuntimeError(f"RosettaScripts did not produce a PDB in {workdir}. See {log_path}")
 
-        newest = max(candidates, key=lambda p: os.path.getmtime(p))
-        shutil.copyfile(newest, out_pdb)
+        # (Advanced: If score file is present, select best scored PDB)
+        scorefile = os.path.join(workdir, "score.sc")
+        best_pdb = None
+        if os.path.exists(scorefile):
+            # Parse the score file for the lowest total_score
+            scores = {}
+            with open(scorefile) as f:
+                header = None
+                for line in f:
+                    if line.startswith("SCORE:"):
+                        cols = line.strip().split()
+                        if header is None:
+                            header = cols
+                        else:
+                            cols_dict = dict(zip(header, cols))
+                            if "total_score" in cols_dict and "description" in cols_dict:
+                                try:
+                                    score = float(cols_dict["total_score"])
+                                    pdb_name = cols_dict["description"]
+                                    scores[pdb_name] = score
+                                except Exception:
+                                    continue
+            # Find PDB basename with min score
+            if scores:
+                min_pdb = min(scores.keys(), key=lambda k: scores[k])
+                # Append .pdb if not present
+                min_pdb = min_pdb if min_pdb.endswith(".pdb") else min_pdb + ".pdb"
+                min_pdb_path = os.path.join(workdir, min_pdb)
+                if os.path.exists(min_pdb_path):
+                    best_pdb = min_pdb_path
+        if not best_pdb:
+            # Default: most recent PDB (should work for small nstruct)
+            best_pdb = max(pdb_candidates, key=os.path.getmtime)
+
+        shutil.copyfile(best_pdb, out_pdb)
 
         if not _nonempty(out_pdb):
             raise RuntimeError(f"Rosetta output PDB missing/empty: {out_pdb}")

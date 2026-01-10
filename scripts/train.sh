@@ -28,13 +28,15 @@ export TORCH_HOME=/scratch/amoldwin/torch_cache
 ##   --lr 1e-4 \
 ##   --out-dir runs
 
-python train.py --train dataset/training_set_dTm.txt \
-  --test dataset/test_set_dTm.txt \
-  --feature-dir /scratch/amoldwin/datasets/PILOT_dTm_esmfold \
-  --job-id ddg_$SLURM_JOB_ID \
-  --seed 0 \
-  --epochs 30 \
-  --lr 1e-4 \
-  --out-dir runs \
-  --mutator-backend rosetta \
-  --label-col dTm
+for SEED in {0..9}; do
+    python train.py --train dataset/training_set_dTm.txt \
+      --test dataset/test_set_dTm.txt \
+      --feature-dir /scratch/amoldwin/datasets/PILOT_dTm_esmfold \
+      --job-id "dTm_${SLURM_JOB_ID}_${SEED}"" \
+      --seed $SEED \
+      --epochs 30 \
+      --lr 1e-4 \
+      --out-dir runs \
+      --mutator-backend rosetta \
+      --label-col dTm
+done
