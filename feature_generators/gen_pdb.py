@@ -305,15 +305,17 @@ def gen_mut_pdb_rosetta(
         xml_path = os.path.join(workdir, "mutate_repack_minimize.xml")
         resfile_path = os.path.join(workdir, "mutate.resfile")
 
-        # Write the resfile with correct header and mutation
+        # Always use chain A for Rosetta resfile mutation
+        chain_for_resfile = "A"
+
         with open(resfile_path, "w") as f:
             f.write("NATRO\n")
             f.write("start\n")
-            f.write(f"{resnum}{icode if icode else ''} {chain_id} PIKAA {mutant}\n")
+            f.write(f"{resnum}{icode if icode else ''} {chain_for_resfile} PIKAA {mutant}\n")
 
         _write_rosettascripts_xml(
             xml_path,
-            chain_id=chain_id,
+            chain_id=chain_for_resfile,
             resnum=resnum,
             icode=icode,
             mutant_aa=mutant,
